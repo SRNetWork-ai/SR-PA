@@ -12,6 +12,9 @@
   <link rel="stylesheet" href="{{ .base_path }}assets/css/components.css?{{ .asset_ver }}">
   <link rel="stylesheet" href="{{ .base_path }}assets/css/ant-bridge.css?{{ .asset_ver }}">
   <link rel="stylesheet" href="{{ .base_path }}assets/css/terminal.css?{{ .asset_ver }}">
+  <!-- SR-UI neon skin. Last on purpose: it is a colour layer and has to win
+       over tokens.css, custom.css and ant-bridge.css. -->
+  <link rel="stylesheet" href="{{ .base_path }}assets/css/sr-ui.css?{{ .asset_ver }}">
   <style>
     [v-cloak] {
       display: none;
@@ -63,7 +66,7 @@
       }
     }
   </style>
-  <title>{{ .host }} – {{ i18n .title}}</title>
+  <title>SR-UI · {{ .host }} – {{ i18n .title}}</title>
 {{ end }}
 
 {{ define "page/head_end" }}
