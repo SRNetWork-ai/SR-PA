@@ -1,0 +1,55 @@
+name: build
+
+# The rebrand touches Go source (main.go, web/service/uninstall.go) that cannot
+# be compiled where it is edited, so CI is the compiler. Every push to main
+# applies the brand pass to a throwaway checkout and builds it: if a rule in
+# scripts/brand-sr-ui.sh ever rewrites something it should not have, the build
+# breaks here instead of on a server.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: brand + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Apply SR-UI branding
+        run: bash scripts/brand-sr-ui.sh
+
+      - name: Verify nothing is left unbranded
+        run: bash scripts/brand-sr-ui.sh --check
+
+      - name: Vet
+        run: go vet ./... || true
+
+      - name: Build
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -ldflags "-s -w" -o sr-ui-amd64 -v .
+
+      - name: Report
+        run: |
+          ls -lh sr-ui-amd64
+          echo "panel name: $(cat config/name)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sr-ui-amd64
+          path: sr-ui-amd64
+          retention-days: 14
