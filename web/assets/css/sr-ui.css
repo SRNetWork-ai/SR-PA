@@ -1,0 +1,285 @@
+/*
+ * sr-ui.css - the SR-UI neon skin: black canvas, neon blue, neon red.
+ *
+ * Loaded LAST in common/page.html, after tokens.css, custom.css,
+ * components.css, ant-bridge.css and terminal.css. Everything above the
+ * "component polish" section only redeclares custom properties on the exact
+ * selectors tokens.css and custom.css already use, so no layout, spacing or
+ * component rule changes shape - only colour does.
+ *
+ * Theme selectors, copied from component/aThemeSwitch.html:
+ *   light       :root
+ *   dark        body.dark
+ *   ultra-dark  html[data-theme='ultra-dark'] body.dark
+ *
+ * The legacy --dark-color-* names are redeclared next to the semantic tokens
+ * because several pages still read them directly and tokens.css deliberately
+ * never aliased them. Redeclaring a custom property that nothing consumes is
+ * inert, so that list is intentionally generous rather than minimal.
+ */
+
+/* ------------------------------------------------------------------ *
+ * 1. Brand constants. Theme-independent.
+ * ------------------------------------------------------------------ */
+
+:root {
+  --sr-blue: #2de2ff;
+  --sr-blue-deep: #0a84ff;
+  --sr-red: #ff2d63;
+  --sr-red-deep: #d8073f;
+  --sr-green: #23f0a0;
+  --sr-amber: #ffb03a;
+
+  --sr-ring: 0 0 0 2px rgba(45, 226, 255, .35);
+  --sr-glow-blue: 0 0 16px -4px rgba(45, 226, 255, .65);
+  --sr-glow-red: 0 0 16px -4px rgba(255, 45, 99, .65);
+  --sr-gradient: linear-gradient(90deg, #2de2ff 0%, #0a84ff 45%, #ff2d63 100%);
+}
+
+/* ------------------------------------------------------------------ *
+ * 2. Light. Kept genuinely light and readable; the neon pair appears as
+ *    accent and error only, both darkened enough to clear 4.5:1 on white.
+ * ------------------------------------------------------------------ */
+
+:root {
+  --bg: #eaf0fa;
+  --surface: #ffffff;
+  --surface-2: #e6edfa;
+  --border: #d2e0f2;
+  --border-strong: #b6cbe8;
+
+  --text: #0a1020;
+  --text-2: #44536b;
+  --text-3: #5c6a83;
+
+  --accent: #0a6ecf;
+  --accent-strong: #0a84ff;
+  --accent-weak: rgba(10, 132, 255, .10);
+  --on-accent: #ffffff;
+
+  --ok: #0f7a52;
+  --info: #0a6ecf;
+  --warn: #8a5a00;
+  --error: #c50f3f;
+  --off: #5c6a83;
+
+  --ok-weak: rgba(15, 122, 82, .10);
+  --info-weak: rgba(10, 110, 207, .10);
+  --warn-weak: rgba(138, 90, 0, .12);
+  --error-weak: rgba(197, 15, 63, .10);
+  --off-weak: rgba(92, 106, 131, .12);
+
+  --shadow-sm: 0 1px 2px rgba(8, 16, 32, .06);
+  --shadow-md: 0 8px 20px -10px rgba(8, 16, 32, .25);
+
+  --color-primary-100: #0a6ecf;
+}
+
+/* ------------------------------------------------------------------ *
+ * 3. Dark. The house style: near-black surfaces, cyan structure, red kept
+ *    for danger and for the second half of the brand gradient.
+ * ------------------------------------------------------------------ */
+
+body.dark {
+  --bg: #04050a;
+  --surface: #090c14;
+  --surface-2: #0e131d;
+  --border: rgba(45, 226, 255, .14);
+  --border-strong: rgba(45, 226, 255, .32);
+
+  --text: #eaf2ff;
+  --text-2: rgba(214, 232, 255, .66);
+  --text-3: rgba(214, 232, 255, .46);
+
+  --accent: #2de2ff;
+  --accent-strong: #0a84ff;
+  --accent-weak: rgba(45, 226, 255, .12);
+  --on-accent: #00121a;
+
+  --ok: #23f0a0;
+  --info: #2de2ff;
+  --warn: #ffb03a;
+  --error: #ff2d63;
+  --off: #6b7b96;
+
+  --ok-weak: rgba(35, 240, 160, .12);
+  --info-weak: rgba(45, 226, 255, .12);
+  --warn-weak: rgba(255, 176, 58, .14);
+  --error-weak: rgba(255, 45, 99, .13);
+  --off-weak: rgba(107, 123, 150, .16);
+
+  --shadow-sm: none;
+  --shadow-md: 0 0 0 1px rgba(45, 226, 255, .06),
+               0 18px 40px -24px rgba(45, 226, 255, .45);
+
+  /* legacy palette still read by the pre-redesign pages */
+  --color-primary-100: #2de2ff;
+  --dark-color-background: #04050a;
+  --dark-color-surface-100: #090c14;
+  --dark-color-surface-200: #0e131d;
+  --dark-color-surface-250: #121826;
+  --dark-color-surface-300: #151c2b;
+  --dark-color-surface-400: #1a2233;
+  --dark-color-stroke: rgba(45, 226, 255, .16);
+  --dark-color-text-primary: rgba(234, 242, 255, .92);
+  --dark-color-text-secondary: rgba(214, 232, 255, .55);
+  --dark-color-table-header-bg: #0a0e18;
+  --dark-color-table-body-bg: #090c14;
+  --dark-color-table-hover-bg: #111a28;
+
+  color-scheme: dark;
+}
+
+/* ------------------------------------------------------------------ *
+ * 4. Ultra-dark. True black page, cards a shade above it, structure carried
+ *    entirely by the cyan hairline.
+ * ------------------------------------------------------------------ */
+
+html[data-theme='ultra-dark'] body.dark {
+  --bg: #000000;
+  --surface: #05070c;
+  --surface-2: #0a0e16;
+  --border: rgba(45, 226, 255, .18);
+  --border-strong: rgba(45, 226, 255, .38);
+
+  --text: #f2f8ff;
+  --text-2: rgba(226, 240, 255, .64);
+  --text-3: rgba(226, 240, 255, .46);
+
+  --dark-color-background: #000000;
+  --dark-color-surface-100: #05070c;
+  --dark-color-surface-200: #0a0e16;
+  --dark-color-surface-250: #0d121c;
+  --dark-color-surface-300: #111826;
+  --dark-color-surface-400: #151e2e;
+  --dark-color-table-header-bg: #05070c;
+  --dark-color-table-body-bg: #000000;
+  --dark-color-table-hover-bg: #0d121c;
+}
+
+/* ------------------------------------------------------------------ *
+ * 5. Component polish. Additive and colour-only: glow, gradient and
+ *    hairlines on chrome that already exists. Nothing here moves a box.
+ * ------------------------------------------------------------------ */
+
+body.dark .bo-shell {
+  background:
+    radial-gradient(1100px 560px at 10% -12%, rgba(10, 132, 255, .12), transparent 60%),
+    radial-gradient(880px 480px at 102% -4%, rgba(255, 45, 99, .09), transparent 58%),
+    var(--bg);
+}
+
+body.dark .bo-rail {
+  background: linear-gradient(180deg, #070a12 0%, #04050a 100%);
+  border-inline-end: 1px solid var(--border);
+}
+
+body.dark .bo-rail-item:hover {
+  color: var(--sr-blue);
+}
+
+body.dark .bo-rail-item.is-active {
+  color: var(--sr-blue);
+  box-shadow: inset 3px 0 0 var(--sr-blue);
+  text-shadow: var(--sr-glow-blue);
+}
+
+body.dark .bo-topbar {
+  border-block-end: 1px solid var(--border);
+}
+
+body.dark .bo-topbar-title {
+  text-shadow: 0 0 22px rgba(45, 226, 255, .25);
+}
+
+/* the rail wordmark, replacing the old raster logo. Collapsed rail keeps the
+   mark and drops the text, which is why the two are separate elements. */
+.sr-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 2px 0;
+  text-decoration: none;
+}
+
+.sr-brand-mark {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  color: var(--sr-blue);
+  filter: drop-shadow(0 0 6px rgba(45, 226, 255, .55));
+}
+
+.sr-brand-text {
+  font-family: var(--font-sans);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .18em;
+  white-space: nowrap;
+  background: var(--sr-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.bo-rail--collapsed .sr-brand-text {
+  display: none;
+}
+
+/* focus, selection and scrollbars, so the neon reads as a system rather than
+   as decoration on two elements. */
+body.dark *:focus-visible {
+  outline: none;
+  box-shadow: var(--sr-ring);
+  border-radius: 6px;
+}
+
+body.dark ::selection {
+  background: rgba(45, 226, 255, .28);
+  color: #ffffff;
+}
+
+body.dark {
+  scrollbar-color: rgba(45, 226, 255, .28) #04050a;
+}
+
+body.dark ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+body.dark ::-webkit-scrollbar-track {
+  background: #04050a;
+}
+
+body.dark ::-webkit-scrollbar-thumb {
+  background: rgba(45, 226, 255, .22);
+  border-radius: 999px;
+}
+
+body.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(45, 226, 255, .38);
+}
+
+/* ant surfaces: shadows and gradients only, never geometry, so a future
+   ant-bridge.css change cannot collide with this file. */
+body.dark .ant-btn-primary {
+  box-shadow: 0 0 0 1px rgba(45, 226, 255, .35), var(--sr-glow-blue);
+}
+
+body.dark .ant-btn-danger,
+body.dark .ant-btn-dangerous {
+  box-shadow: 0 0 0 1px rgba(255, 45, 99, .35), var(--sr-glow-red);
+}
+
+body.dark .ant-progress-bg {
+  background-image: var(--sr-gradient);
+}
+
+body.dark .ant-card,
+body.dark .ant-modal-content,
+body.dark .ant-drawer-content {
+  box-shadow: var(--shadow-md);
+}
