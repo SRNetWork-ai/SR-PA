@@ -1,16 +1,11 @@
 package job
 
 import (
-	"encoding/json"
-	"strings"
-
 	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
 	"github.com/mhsanaei/3x-ui/v2/web/service/rbridge"
 	"github.com/mhsanaei/3x-ui/v2/web/websocket"
 	"github.com/mhsanaei/3x-ui/v2/xray"
-
-	"github.com/valyala/fasthttp"
 )
 
 // XrayTrafficJob collects and processes traffic statistics from Xray, updating the database and optionally informing external APIs.
@@ -63,45 +58,6 @@ func NewXrayTrafficJob(rs *service.RadiusService) *XrayTrafficJob {
 	j.sweeper.Register(&j.awgService)
 	j.sweeper.Register(&j.greService)
 	return j
-}
-
-// appendUnrecorded appends each fallback record whose email has no record in `existing`
-// stampSourceInbound names the inbound each relay record's bytes came from, so
-// the traffic multiplier bills them at that inbound's rate rather than at
-// whichever inbound the account's single client_traffics row happens to name.
-// An account missing from the map (or ambiguous, which the map reports as 0) is
-// left at 0, which the billing reads as "unknown" and handles by taking the max
-// across the account's memberships.
-func stampSourceInbound(records []*xray.ClientTraffic, idByEmail map[string]int) []*xray.ClientTraffic {
-	if len(records) == 0 || len(idByEmail) == 0 {
-		return records
-	}
-	for _, record := range records {
-		if record.InboundId != 0 {
-			continue
-		}
-		record.InboundId = idByEmail[service.AccountKeyOf(record.Email)]
-	}
-	return records
-}
-
-// yet, and returns the extended slice. It is the de-duplication guard for the relay
-// protocols: see the call site in Run for why presence, not byte count, is the predicate.
-func appendUnrecorded(existing, fallback []*xray.ClientTraffic) []*xray.ClientTraffic {
-	recorded := make(map[string]bool, len(existing))
-	for _, t := range existing {
-		recorded[t.Email] = true
-	}
-	for _, t := range fallback {
-		if recorded[t.Email] {
-			continue
-		}
-		// Mark as we go so two relays reporting the same account in one tick contribute
-		// once, not twice.
-		recorded[t.Email] = true
-		existing = append(existing, t)
-	}
-	return existing
 }
 
 // Run collects traffic statistics from Xray and updates the database, triggering restart if needed.
@@ -213,28 +169,25 @@ func (j *XrayTrafficJob) Run() {
 	// can use the nft per-IP path above. Each keeps its own per-account byte counters
 	// (telemt's Prometheus metrics; the SSH gateway's io.Copy tallies).
 	//
-	// But both egress through a paired Xray socks inbound whose USERNAME is the account
-	// email, so Xray has usually already billed those exact bytes as a user stat in this
-	// same tick. Appending unconditionally therefore hands addClientTraffic two records
-	// measuring one transfer. That used to be masked by a `break` in addClientTraffic
-	// that silently applied only the first record per email, which made the outcome
-	// correct purely by append order: reordering these two lines would have doubled
-	// every relay account's bill. addClientTraffic now SUMS per email, so the
-	// de-duplication has to be explicit and it belongs here, at the point where the two
-	// sources meet.
+	// Both egress through a paired Xray socks inbound whose USERNAME is the account
+	// email, and Xray copies that username onto the session user, so historically Xray
+	// billed the SAME bytes a second time as a user stat and one of the two copies had
+	// to be dropped. appendUnrecorded still does that for mtproto: it drops the relay
+	// copy for any account Xray already has a record for this tick.
 	//
-	// The predicate is "does this account already have a record this tick", NOT "did it
-	// move bytes this tick". The two sources flush on different boundaries: Xray can
-	// report zero for an account whose bytes the relay has already tallied, and report
-	// those same bytes a tick or two later. Gating on a positive byte count therefore
-	// admits the relay copy now and the Xray copy afterwards, billing the transfer twice
-	// (measured: 1.67x on a 100MiB SSH pull). Presence alone is stable, and it is what
-	// the old first-record-wins behaviour effectively tested.
+	// SSH no longer needs that guess, and must not make it. Its bridge runs at
+	// service.RelayBridgeUserLevel, a policy level the panel never enables statsUser*
+	// on, so Xray counts ssh bytes at the inbound level only and emits no user counter
+	// for them. The gateway's own tally is exact and is the only record of them, so it
+	// is appended unconditionally.
 	//
-	// The relay counters remain a real fallback for an account Xray does not track at all
-	// (no socks user, so no record in any tick), which is what those tallies exist for.
+	// That is the fix for a real accounting hole: the presence predicate meant any
+	// account that ALSO held an Xray-native config had a user record in every tick
+	// (GetTraffic emits one per registered counter, including zero-valued ones), so its
+	// ssh bytes were dropped forever. The inbound's counter climbed while the client's
+	// own usage never moved.
 	//
-	// Both relays now name their own inbound: telemt scrapes per inbound and the SSH
+	// Both relays name their own inbound: telemt scrapes per inbound and the SSH
 	// gateway counts per listener, so each record arrives already stamped. The stamp
 	// below is the fallback for a record that still carries none, and it skips any
 	// that does (see stampSourceInbound). SingleInboundIdByEmail returns 0 when two
@@ -242,7 +195,7 @@ func (j *XrayTrafficJob) Run() {
 	// multiplier across memberships and contributes nothing to the breakdown.
 	clientTraffics = appendUnrecorded(clientTraffics, stampSourceInbound(
 		j.mtprotoService.CollectTraffic(), j.inboundService.SingleInboundIdByEmail("mtproto")))
-	clientTraffics = appendUnrecorded(clientTraffics, stampSourceInbound(
+	clientTraffics = appendRelayMeasured(clientTraffics, stampSourceInbound(
 		j.sshService.CollectTraffic(), j.inboundService.SingleInboundIdByEmail("ssh")))
 
 	// Level-triggered enforcement: disconnect any STILL-connected client that is no
@@ -359,115 +312,5 @@ func (j *XrayTrafficJob) Run() {
 
 	if updatedOutbounds != nil {
 		websocket.BroadcastOutbounds(updatedOutbounds)
-	}
-}
-
-func (j *XrayTrafficJob) informTrafficToExternalAPI(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) {
-	informURL, err := j.settingService.GetExternalTrafficInformURI()
-	if err != nil {
-		logger.Warning("get ExternalTrafficInformURI failed:", err)
-		return
-	}
-	requestBody, err := json.Marshal(map[string]any{"clientTraffics": clientTraffics, "inboundTraffics": inboundTraffics})
-	if err != nil {
-		logger.Warning("parse client/inbound traffic failed:", err)
-		return
-	}
-	request := fasthttp.AcquireRequest()
-	defer fasthttp.ReleaseRequest(request)
-	request.Header.SetMethod("POST")
-	request.Header.SetContentType("application/json; charset=UTF-8")
-	request.SetBody([]byte(requestBody))
-	request.SetRequestURI(informURL)
-	response := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(response)
-	if err := fasthttp.Do(request, response); err != nil {
-		logger.Warning("POST ExternalTrafficInformURI failed:", err)
-	}
-}
-
-// broadcastTrafficScoped delivers the traffic tick to each connected admin,
-// filtered to the clients they own. Super admins get the unfiltered payload.
-func (j *XrayTrafficJob) broadcastTrafficScoped(
-	traffics []*xray.Traffic,
-	clientTraffics []*xray.ClientTraffic,
-	onlineClients []string,
-	onlineMemberships []string,
-	lastOnlineMap map[string]int64,
-) {
-	hub := websocket.GetHub()
-	if hub == nil {
-		return
-	}
-	userIds := hub.ConnectedUserIds()
-	if len(userIds) == 0 {
-		return
-	}
-
-	supers, err := j.adminService.SuperAdminIds()
-	if err != nil {
-		logger.Warning("traffic broadcast: cannot load super admins, skipping:", err)
-		return
-	}
-	// Only pay for the access map if a non-super admin is actually watching.
-	var access map[string]map[int]bool
-	for _, id := range userIds {
-		if !supers[id] {
-			access, err = j.adminService.ClientEmailAccess()
-			if err != nil {
-				logger.Warning("traffic broadcast: cannot load client access, skipping:", err)
-				return
-			}
-			break
-		}
-	}
-
-	for _, userId := range userIds {
-		if supers[userId] {
-			websocket.BroadcastTrafficToUser(userId, map[string]any{
-				"traffics":          traffics,
-				"clientTraffics":    clientTraffics,
-				"onlineClients":     onlineClients,
-				"onlineMemberships": onlineMemberships,
-				"lastOnlineMap":     lastOnlineMap,
-			})
-			continue
-		}
-		mine := make([]*xray.ClientTraffic, 0, len(clientTraffics))
-		for _, ct := range clientTraffics {
-			if access[ct.Email][userId] {
-				mine = append(mine, ct)
-			}
-		}
-		myOnline := make([]string, 0, len(onlineClients))
-		for _, email := range onlineClients {
-			if access[email][userId] {
-				myOnline = append(myOnline, email)
-			}
-		}
-		// Scoped on the email half of the pair, exactly as the list above is: the
-		// pairs name the same clients, and shipping them unfiltered would hand a
-		// delegated admin the emails the filtering exists to withhold.
-		myMemberships := make([]string, 0, len(onlineMemberships))
-		for _, pair := range onlineMemberships {
-			if _, email, found := strings.Cut(pair, ":"); found && access[email][userId] {
-				myMemberships = append(myMemberships, pair)
-			}
-		}
-		myLastOnline := make(map[string]int64, len(lastOnlineMap))
-		for email, t := range lastOnlineMap {
-			if access[email][userId] {
-				myLastOnline[email] = t
-			}
-		}
-		// traffics is inbound-level and keyed by Xray tag rather than email, so it is
-		// omitted for non-super admins rather than shipped unfiltered. The per-client
-		// figures above are what the inbounds table renders.
-		websocket.BroadcastTrafficToUser(userId, map[string]any{
-			"clientTraffics":    mine,
-			"onlineClients":     myOnline,
-			"onlineMemberships": myMemberships,
-			"lastOnlineMap":     myLastOnline,
-		})
 	}
 }
