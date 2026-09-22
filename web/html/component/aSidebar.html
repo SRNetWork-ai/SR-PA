@@ -3,8 +3,13 @@
     <nav class="bo-rail" :class="{ 'bo-rail--collapsed': collapsed }"
         aria-label='{{ i18n "menu.navigation"}}'>
         <div class="bo-rail-brand">
-            <a href="{{ .base_path }}panel/" aria-label="VPN-UI">
-                <img src="{{ .base_path }}assets/img/logo.png" alt="VPN-UI" />
+            <a class="sr-brand" href="{{ .base_path }}panel/" aria-label="SR-UI">
+                <svg class="sr-brand-mark" viewBox="0 0 32 32" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M16 2.5 27 7.6v9.1c0 6.3-4.6 11.5-11 13.3-6.4-1.8-11-7-11-13.3V7.6z" />
+                    <path d="M20.3 11.7a5 5 0 0 0-7.5.6c-1.4 1.9-.3 4 2.2 4.6l2.2.5c2.5.6 3.6 2.7 2.2 4.6a5 5 0 0 1-7.5.6" />
+                </svg>
+                <span class="sr-brand-text">SR-UI</span>
             </a>
         </div>
 
