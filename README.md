@@ -1,280 +1,247 @@
-[English](/README.md) | [فارسی](/README_FA.md) | [العربية](/README_AR.md) | [中文](/README_ZH.md) | [Español](/README_ES.md) | [Русский](/README_RU.md) | [Türkçe](/README_TR.md)
+<div align="center">
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Sir-MmD/vpn-ui/refs/heads/main/media/logo.png" alt="VPN-UI Logo" width="260">
-</p>
+# SR-UI
 
-This project is an enhanced version of the **[3X-UI](https://github.com/MHSanaei/3x-ui)** panel (version 2.9.3). The goal of this project is to add various protocols and set it up as an all-in-one panel with support for **Xray-core** features.
+**A multi-protocol VPN control panel.** Xray-core plus a full set of native VPN
+servers, multi-node relays for multi-location deployments, one account across
+many inbounds, and per-account accounting that actually adds up.
 
-![Overview](https://raw.githubusercontent.com/Sir-MmD/vpn-ui/refs/heads/main/media/overview.png)
+English | [فارسی](README_FA.md) | [العربية](README_AR.md) | [Русский](README_RU.md) | [中文](README_ZH.md) | [Türkçe](README_TR.md) | [Español](README_ES.md)
 
-## New Protocols
+</div>
 
-- PPTP
-- L2TP (RAW)
-- L2TP/IPsec
-- OpenVPN
-- OpenConnect (cisco)
-- SSTP
-- IKEv2
-- WireGuard (C)
-- AmneziaWG (obfuscated WireGuard)
-- GRE (site-to-site router tunnels, optionally over IPsec)
-- MTProto Proxy (Telegram)
-- SSH
+---
 
-Plus three protocols added to the patched Xray-core itself, so they are served by
-the core rather than by a daemon, and they work as **inbounds and outbounds**:
+## What SR-UI is
 
-- AnyTLS
-- TUIC (v5)
-- NaiveProxy
+Most panels are an Xray front end. SR-UI is a **control plane**: Xray is one of
+the engines it drives, next to WireGuard, AmneziaWG, IKEv2, OpenVPN,
+OpenConnect, SSTP, L2TP, PPTP, GRE, MTProto and an in-binary SSH gateway. One
+account can live on several of them at once, and the panel keeps billing,
+limits and enforcement consistent across all of them.
 
-## New Features
+Three things define it:
 
-- **Multi-Admin** with per-inbound access, so each admin only sees the inbounds you assign it
-- **Reseller** accounts with a metered traffic balance an admin recharges, spent only on the inbounds it was given
-- **Client to Client** support, even as **Cross Inbound** (an internal connection between an L2TP user and an OpenVPN user)
-- Added **AES-256-GCM** and **AES-128-GCM** **Encryption** to the **Shadowsocks** protocol
-- Support for **XHTTP Object** in **Inbound** and **Outbound**
-- Automatic installation script for **[WARP-CLI](https://github.com/Sir-MmD/warp-cli)** (Cloudflare's official version)
-- A [patched **Xray-core**](https://github.com/Sir-MmD/Xray-core) that fixes the "Unsupported Cipher" error in the **Shadowsocks** protocol, and adds **AnyTLS**, **TUIC** and **NaiveProxy** as native protocols, so they inherit per-account traffic accounting, speed limits, device limits and online detection instead of needing a second core
-- Bundling all files (**Geofile**, **Xray-core**, and **Backend** cores) into a single binary
-- **Real SSL for a bare server IP**, for a host with no domain at all (Let's Encrypt issues these; the certificate names the address itself)
-- Certificate renewals are picked up **without restarting the panel**, so nobody is disconnected when a certificate rolls over
-- Exporting account links as **TXT** and **PDF**
-- Ability to **Freeze** accounts
-- Added **checkboxes** to clients and **Inbound**s
-- **Bulk Operation** support:
-    * Bulk change of accounts' traffic
-    * Bulk change of accounts' days
-    * Bulk enable/disable of accounts
-    * Bulk delete of accounts
-    * Bulk delete of Inbounds
-    * Bulk **Freeze/Un-Freeze** of accounts
+- **One account, many inbounds.** An account is not a row inside one inbound. It
+  is an identity with a set of memberships, so the same customer can hold a
+  VLESS config on a node in Germany, a WireGuard peer at home and an SSH login,
+  under one quota, one expiry and one device cap.
+- **Multi-node.** The panel host is the master. Remote nodes run a lightweight
+  agent, sync their inbound set from the master, and report usage back, so
+  multi-location is a deployment choice rather than a second panel.
+- **Accounting that is exact.** Every protocol has a metering path chosen to fit
+  how it moves bytes: Xray stats API for native protocols, nftables counters per
+  tunnel address for the kernel VPNs, and in-process byte counters for the
+  userspace relays. Nothing is estimated, and nothing is billed twice.
 
-## Tested Operating Systems
+---
 
+## Protocols
 
-| | Distribution |Version |Version |
-|:---:|:---|:---:|:---:|
-| <img src="https://cdn.simpleicons.org/ubuntu" width="32" height="32" alt="Ubuntu"> | **Ubuntu** | `24.04` | `26.04` |
-| <img src="https://cdn.simpleicons.org/debian" width="32" height="32" alt="Debian"> | **Debian** | `12` | `13` |
-| <img src="https://cdn.simpleicons.org/fedora" width="32" height="32" alt="Fedora"> | **Fedora** | `43` | `44` |
-| <img src="https://cdn.simpleicons.org/almalinux/2F80ED" width="32" height="32" alt="AlmaLinux"> | **AlmaLinux** | `9` | `10` |
-| <img src="https://cdn.simpleicons.org/rockylinux" width="32" height="32" alt="Rocky Linux"> | **Rocky Linux** | `9` | `10` |
-| <img src="https://cdn.simpleicons.org/centos" width="32" height="32" alt="CentOS Stream"> | **CentOS Stream** | `9` | `10` |
-| <img src="https://cdn.simpleicons.org/archlinux" width="32" height="32" alt="Arch Linux"> | **Arch Linux** | `Rolling` | |
+| Family | Protocols | Metering | Notes |
+| --- | --- | --- | --- |
+| Xray | VLESS, VMess, Trojan, Shadowsocks, SOCKS, HTTP, Dokodemo-door | Xray stats API | REALITY, XTLS, XHTTP, gRPC, WebSocket, TCP, mKCP, HTTPUpgrade |
+| Kernel VPN | WireGuard, AmneziaWG, IKEv2 (PSK / EAP-TLS / EAP-MSCHAPv2), L2TP/IPsec, PPTP, GRE | nftables counters | per-client tunnel address, hard enforcement by peer and route removal |
+| TLS VPN | OpenVPN, OpenConnect (ocserv), SSTP | nftables counters | RADIUS-backed auth and session control |
+| Relay | MTProto, SSH (in-binary Go gateway, TCP plus UDP via udpgw) | in-process counters | no tunnel address, routed through a loopback bridge |
 
+The SSH gateway is worth calling out: it terminates in the panel binary, so it
+owns every connection. That gives it both device-limit strategies (reject the
+new device, or accept it and evict the oldest) and exact byte accounting with no
+external daemon, no kernel module and no nftables rules.
 
-> [!IMPORTANT]
-> It is strongly recommended that you install the panel on one of the tested operating systems, because there is a high chance that the new cores will not work correctly on other operating systems!
+---
 
-> [!NOTE]
-> **AmneziaWG runs on Debian 12/13 and Ubuntu 24.04/26.04 only.**
-> Unlike every other protocol, AmneziaWG is not in any distribution's kernel: the panel compiles its kernel module on your server during setup. That module currently fails to build in two cases. On **kernel 7.1 or newer** (Fedora 43/44, Arch) the kernel removed the `ipv6_stub` symbol the module still uses. On **AlmaLinux, Rocky Linux and CentOS Stream** the backported RHEL kernels collide with the module's compatibility layer, and EL10 is not recognised by it at all. Both are limitations of the upstream AmneziaWG module, with fixes still open upstream, so they are not something the panel can configure around.
-> Setup detects this and tells you, rather than failing silently. **Every other protocol works normally on all tested operating systems.**
+## Nodes and multi-location
 
-## Installing the Panel
+- **Master.** The panel host itself. It owns every account and all billing and
+  cannot be deleted or disabled.
+- **Nodes.** Remote servers running the agent. Each node reports status, agent
+  version, sync state and its inbound count, and shows up as a group in the
+  client editor so you pick exactly which node's inbounds an account gets.
+- **Sync.** Inbound definitions flow master to node; usage and session state flow
+  node to master, so quota, expiry and device limits are enforced from one place.
 
-```bash
-curl -Ls https://raw.githubusercontent.com/Sir-MmD/vpn-ui/refs/heads/main/deploy.sh | sudo bash
-```
+A customer's config set can therefore span locations: one subscription link, one
+quota, several exit points.
 
-## Uninstalling the Panel
+---
 
-```bash
-sudo /opt/vpn-ui/vpn-ui-amd64 --uninstall
-```
+## Limits and enforcement
 
-> [!NOTE]
-> The database path, the **systemd** service, and all default ports have been changed, so you can install this panel alongside your other panels without any issues.
+| Limit | Scope | What happens at the limit |
+| --- | --- | --- |
+| Traffic quota | account | account disabled, live sessions torn down within one tick |
+| Expiry | account | same, plus refusal at the next auth |
+| Speed limit | account, with "limit after N bytes" | applied live through the speed-limit sidecar, no core restart |
+| Device / user limit | inbound, with a per-account override that can only lower it | reject the new device, or accept it and evict the oldest |
+| IP limit | account | over-limit source addresses are blocked and logged |
 
-## How the New Protocols Interact with Xray-core
+Enforcement is level-triggered, not fire-and-forget: every traffic tick
+re-derives the disabled set from the database and re-applies it, so a session
+that slipped through the exact tick a quota was crossed is still ended on the
+next one.
 
-```mermaid
-flowchart TB
-  Client["VPN Client<br/>(L2TP/IPsec · PPTP · OpenVPN · OpenConnect · SSTP · IKEv2 · WireGuard (C) · AmneziaWG)"]
-  TGC["Telegram Client<br/>(MTProto Proxy)"]
-  SSHC["SSH Client<br/>(ssh -D dynamic SOCKS · badvpn-udpgw for UDP)"]
-  GREC["Customer Router<br/>(GRE · IP protocol 47 · optional IPsec / FOU)"]
+---
 
-  subgraph PANEL["vpn-ui panel — root process"]
-    PROC["procmgr<br/>supervises the daemons"]
-    RAD["in-binary RADIUS<br/>127.0.0.1:1812 auth · :1813 acct"]
-    HOOK["OpenVPN hooks<br/>auth / connect / disconnect / evict"]
-    CONF["writes Xray config:<br/>dokodemo-door inbound +<br/>per-account source-IP routing"]
-    STAT["reads Xray stats (gRPC)<br/>enforces traffic / device limits"]
-    SSHSRV["in-binary SSH gateway (x/crypto/ssh)<br/>no daemon, no bundle: direct-tcpip + udpgw"]
-  end
+## Operations
 
-  subgraph DAEMON["Bundled VPN daemons (panel children)"]
-    D["xl2tpd + strongSwan/charon · pptpd · openvpn · ocserv · accel-ppp<br/>(pppd for L2TP/PPTP · accel-ppp for SSTP · charon for IKEv2 and GRE-over-IPsec)"]
-    MT["telemt (MTProto Proxy)<br/>userspace relay: no tunnel, no pool IP"]
-  end
+- **Admins and roles.** Multiple admins with permission scoping; each admin sees
+  only their own inbounds and clients.
+- **Resellers.** Credit-based reseller accounts that spend from a balance when
+  they create clients.
+- **Subscriptions.** Per-account subscription links with the usual client
+  formats, plus QR rendering in the panel.
+- **LDAP sync.** Optional job that mirrors a directory into panel accounts.
+- **Backups, logs, geo files, certificates.** Scheduled jobs for geo data and
+  certificate renewal, log rotation, and one-click backup and restore.
+- **Live panel.** Traffic, online clients and outbound stats stream over a
+  WebSocket, scoped per admin so no admin ever receives another admin's data.
 
-  subgraph KERNEL["Linux kernel data plane"]
-    IFACE["ppp0 / tun0 / wgc0 / awg0 / gre-*<br/>client is assigned a pool IP"]
-    NFT["nftables mark:<br/>UDP → TPROXY · TCP → REDIRECT"]
-    RULE["ip rule fwmark 1 → table 100"]
-  end
+---
 
-  subgraph XRAY["Xray-core (bundled, panel-managed)"]
-    DOKO["dokodemo-door inbound<br/>sockopt tproxy, mark 255"]
-    SOCKS["socks inbound (loopback)<br/>tag = MTProto / SSH inbound<br/>username = account"]
-    ROUTE{"routing:<br/>match source IP → account<br/>or socks username → account"}
-    OUT["outbound<br/>freedom / proxy / WARP"]
-  end
+## API
 
-  NET["Internet"]
+The panel exposes an HTTP API covering inbounds, clients, memberships, traffic,
+nodes, settings and server actions. It is documented in full, endpoint by
+endpoint with request and response bodies, in [api-reference.md](api-reference.md).
 
-  %% control plane
-  Client -->|"tunnel + credentials"| D
-  Client -.->|"WireGuard (C): in-kernel wgc, no daemon"| IFACE
-  Client -.->|"AmneziaWG: in-kernel awg (DKMS module), no daemon<br/>obfuscated handshake: Jc/Jmin/Jmax · S1/S2 · H1-H4"| IFACE
-  GREC -.->|"GRE: in-kernel tunnel, no daemon and no credentials<br/>peer pinned by its public IP, or learned from its first packets<br/>optional ESP transport on the shared charon · FOU for peers behind NAT"| IFACE
-  TGC -->|"obfuscated2 / dd / FakeTLS secret"| MT
-  SSHC -->|"username + password (checked in-process, no RADIUS)"| SSHSRV
-  D -.->|"MS-CHAPv2 Access-Request"| RAD
-  RAD -.->|"Accept + pool IP"| D
-  D -.->|"user-pass / client-connect"| HOOK
-  HOOK -.->|"lease per-account IP"| D
-  PROC --- D
-  CONF --> DOKO
-  CONF --> ROUTE
+---
 
-  %% data plane
-  D -->|"decapsulated packets"| IFACE
-  IFACE --> NFT --> RULE --> DOKO
-  DOKO --> ROUTE --> OUT --> NET
-  MT -->|"relayed TCP, socks user = account"| SOCKS
-  SSHSRV -->|"direct-tcpip → socks CONNECT · udpgw → socks UDP ASSOCIATE<br/>socks user = account"| SOCKS
-  SOCKS --> ROUTE
+## Install
 
-  %% accounting + return
-  OUT -.->|"per-account counters"| STAT
-  MT -.->|"per-account octets (Prometheus scrape)"| STAT
-  SSHSRV -.->|"per-account octets (in-process counters)"| STAT
-  STAT -.->|"disconnect over-limit"| RAD
-  NET -.->|"replies (symmetric path back)"| OUT
-```
+### From a release binary
 
-## How RBridge Handles Non-RADIUS Protocols
-
-WireGuard (C), AmneziaWG and the IKEv2 **PSK** / **EAP-TLS** modes authenticate with a public key or a certificate, so they never make a RADIUS round-trip. On their own they would get no session record, no traffic accounting, and no **User Limit** enforcement. **RBridge** (Radius Bridge) closes that gap: once per traffic tick its **Sweeper** polls each protocol's live tunnels, enforces quota, disable, and the per-account **User Limit** K (evicting the losers), then reconciles the survivors into the very same in-binary **RADIUS** session registry and **nftables** accounting the RADIUS protocols already use. A key-based protocol therefore behaves identically for usage, quota, and device limits, and egresses through the same Xray **dokodemo-door** data plane.
-
-For the two key-based tunnel protocols, **WireGuard (C)** and **AmneziaWG**, a **User Limit** of K provisions K device slots per account: K keypairs, K configs and K distinct tunnel IPs, one config per device. That is the same model the commercial providers use, and it is what makes a single account usable on a phone, a laptop and a router at once without the devices fighting over one key.
-
-```mermaid
-flowchart TB
-  subgraph SRC["Non-RADIUS protocols (public-key / certificate auth, no RADIUS round-trip)"]
-    WG["WireGuard (C)<br/>in-kernel, wgctrl-managed"]
-    AWG["AmneziaWG<br/>in-kernel amneziawg (DKMS), obfuscated"]
-    IKE["IKEv2 PSK / EAP-TLS<br/>strongSwan charon"]
-  end
-
-  subgraph BRIDGE["RBridge, the Radius Bridge (one pass per traffic tick)"]
-    SWEEP["Sweeper.Tick()"]
-    P1["1 · Poll live tunnels via each Adapter"]
-    P2["2 · Enforce quota + disable<br/>+ User-Limit K + strategy"]
-    P3["3 · Reconcile survivors into the Sink"]
-  end
-
-  subgraph SINK["Sink, the existing RADIUS session model"]
-    REG["in-binary RADIUS<br/>session registry"]
-    ACCT["nftables per-account counters<br/>→ client_traffics (usage / quota)"]
-  end
-
-  XRAY["Xray-core<br/>source-IP routing → outbound → Internet"]
-
-  %% control plane
-  WG -.->|"peers + last-handshake"| P1
-  AWG -.->|"peers + last-handshake"| P1
-  IKE -.->|"active SAs + Framed-IP"| P1
-  SWEEP --> P1 --> P2 --> P3
-  P2 -.->|"evict: remove peer / terminate SA"| WG
-  P2 -.->|"evict: remove peer"| AWG
-  P2 -.->|"evict: terminate SA"| IKE
-  P3 -->|"tunnel IP → account"| REG
-  P3 -->|"add / remove counters"| ACCT
-  ACCT -.->|"disabled / over-quota"| P2
-
-  %% data plane
-  WG ==> XRAY
-  AWG ==> XRAY
-  IKE ==> XRAY
-  ACCT -.- XRAY
-```
-
-## Building from Source
+Download the binary for your architecture from the repository releases, then
+install the service and the management menu:
 
 ```bash
-git clone https://github.com/Sir-MmD/vpn-ui.git && cd vpn-ui
-./build.sh
+sudo mkdir -p /opt/sr-ui
+sudo mv sr-ui-amd64 /opt/sr-ui/
+sudo chmod +x /opt/sr-ui/sr-ui-amd64
+sudo /opt/sr-ui/sr-ui-amd64 install-menu /usr/bin/sr-ui
+sudo /opt/sr-ui/sr-ui-amd64 --systemd
+sudo systemctl enable --now sr-ui
 ```
 
-## E2E Testing
+Then open the panel and sign in. Change the default credentials and the panel
+port before exposing it.
 
-![E2E Test](https://raw.githubusercontent.com/Sir-MmD/vpn-ui/refs/heads/main/media/test_unit.png)
+### Migrating an existing install
 
-A complete **E2E** test written in Python has been designed for this project inside the `test_unit` folder, which you are welcome to use. The steps are as follows:
-
-1. Go into the `test_unit` folder and enter your desired settings in `config.toml`.
-2. Run the `setup.sh` script.
-3. Place the compiled binary inside the `test_subject` folder.
-4. Run `run.sh` with `sudo` privileges.
-
-> [!IMPORTANT]
-> The full E2E test is extremely time-consuming; if you have only made a small change to the project, it is better to test only that specific part using the `--tests` switch:
-
-| Test ID | Description |
-| :--- | :--- |
-| `core-init` | provision kernel modules + packages + xray core |
-| `server-setup` | create inbounds + accounts + source-IP routing rules |
-| `openvpn` | connect variants + checks + peer reachability (OpenVPN) |
-| `l2tp` | connect variants + checks + peer reachability (L2TP/IPsec) |
-| `pptp` | connect variants + checks + peer reachability (PPTP) |
-| `openconnect` | connect variants + checks + peer reachability + same-NAT user-limit (OpenConnect/ocserv) |
-| `sstp` | connect variants + checks + peer reachability (SSTP/accel-ppp, PPP-over-TLS) |
-| `ikev2` | connect + checks + peer reachability (IKEv2/IPsec, strongSwan charon; eap-mschapv2 + psk + eap-tls) |
-| `wg-c` | connect + checks + peer reachability + per-account usage/termination (WireGuard C, in-kernel wgctrl, gateway /29, + preshared-key mode) |
-| `awg` | connect + checks + peer reachability + per-account usage/termination (AmneziaWG, in-kernel amneziawg DKMS module, obfuscation params, + preshared-key mode) |
-| `gre` | connect + checks + peer reachability + per-account usage/termination (GRE site-to-site, in-kernel ip_gre; raw / IPsec / FOU peer modes, static and dynamic peers) |
-| `mtproto` | alias: runs every MTProto phase below (MTProto Proxy, telemt) |
-| `mtproto-classic` | handshake + relay to a real Telegram DC + wrong-secret control + usage (obfuscated2) |
-| `mtproto-secure` | same, "dd" random-padding secret |
-| `mtproto-tls` | same + FakeTLS ServerHello HMAC verified, "ee" secret |
-| `mtproto-toggle` | editing an account's modes takes effect on the RUNNING daemon (no restart) |
-| `mtproto-termination` | quota auto-disables the account AND the proxy stops relaying for it |
-| `mtproto-adtag` | an ad tag forces middle-proxy egress and drops the inbound's Xray routing, and clearing it restores both |
-| `ssh` | connect + checks + routing + user-limit + both strategies + per-account usage/termination (SSH relay, in-binary Go gateway) |
-| `ssh-udp` | UDP through the relay: udpgw terminated in-process and bridged to Xray via SOCKS5 UDP ASSOCIATE, plus accounting |
-| `bulk-ops` | bulk client add/sub/enable/disable + TXT/PDF export via API |
-| `backup-restore` | DB export + import round-trip |
-| `warp-socks` | Cloudflare warp-cli SOCKS install + egress |
-| `random-cfg` | `--random` switch: randomize port + creds + webpath, then restore |
-| `systemd` | `--systemd` switch: install + run the panel as a systemd unit |
-| `uninstall` | `--uninstall` switch: install everything, tear down, assert clean host |
-| `export-js` | host-side Node TXT/PDF export test (no VM) |
-
-To test on only one specific operating system, you can use the `--only` switch:
+A server already running the upstream panel can be moved over in place. The
+migration script stops the old unit, moves the data directory and database,
+rewrites the systemd unit and the management command, and starts the panel again
+as `sr-ui`:
 
 ```bash
-sudo ./run.sh --only ubuntu-24
+sudo bash scripts/srui-server-migrate.sh --dry-run   # show the plan
+sudo bash scripts/srui-server-migrate.sh             # apply it
 ```
 
-## Donate
+After it finishes, open Settings, Panel, and set the service name to `sr-ui` so
+the panel restarts itself through the right unit.
 
-🔹USDC-Polygon: ```0xdC2Ab962954e8fA1502C44656c5A32CF2979568C```
+### Management menu
 
-🔹USDT-BEP20: ```0xdC2Ab962954e8fA1502C44656c5A32CF2979568C```
+```bash
+sr-ui
+```
 
-🔹USDT-TRC20: ```TXEhckDXtdLGAjP5PZXfNnQjPHzEVTcBmR```
+The menu covers start, stop and restart, status and logs, port and credential
+changes, certificate issuance and renewal, backup and restore, core management
+and uninstall.
 
-🔹TRX: ```TXEhckDXtdLGAjP5PZXfNnQjPHzEVTcBmR```
+---
 
-🔹LTC: ```ltc1qmapmnuf6cq9x679nmu0k4uyq779mxxcwnkgdll```
+## Build from source
 
-🔹BTC: ```bc1q62w7lyndzndsp74vj4dsayvun8xnapzq6hx5ea```
+Go 1.24 or newer:
 
-🔹ETH: ```0xdC2Ab962954e8fA1502C44656c5A32CF2979568C```
+```bash
+git clone github.com/SRNetWork-ai/SR-PA.git
+cd SR-PA
+bash scripts/brand-sr-ui.sh --check    # verify brand strings
+go build -trimpath -ldflags "-s -w" -o sr-ui-amd64 -v .
+```
+
+The repository also ships `build.sh` for the full release build (embedded assets
+and bundled cores) and `deploy.sh` for scripted server deployment. CI builds and
+vets every push, so release artifacts come from the workflow rather than a
+workstation.
+
+---
+
+## Configuration
+
+Runtime paths and log level are read from the environment. The current build
+reads these names:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `VPNUI_LOG_LEVEL` | log verbosity (`debug`, `info`, `warning`, `error`) | `info` |
+| `VPNUI_DEBUG` | enable debug mode | `false` |
+| `VPNUI_BIN_FOLDER` | Xray and helper binaries | `bin` |
+| `VPNUI_DB_FOLDER` | database directory | `/etc/x-ui` |
+| `VPNUI_LOG_FOLDER` | log directory | `/var/log` |
+
+`SRUI_` aliases are planned; until they land these names stay valid, so an
+upgrade never breaks an existing unit file.
+
+---
+
+## Repository layout
+
+```
+main.go            entry point, CLI, embedded management script
+config/            build-time name, version and path resolution
+web/
+  controller/      HTTP handlers and API routes
+  service/         panel logic: inbounds, accounts, protocols, nodes, limits
+  job/             scheduled work: traffic, IP limit, certificates, geo, LDAP
+  html/            panel templates
+  assets/          panel CSS and JS
+xray/              Xray process control, config model and stats API client
+database/          models and migrations
+sub/               subscription server
+scripts/           branding and server migration helpers
+test_unit/         integration harness
+```
+
+---
+
+## Documentation
+
+The design documents in the repository root are the real reference for how each
+subsystem works and why:
+
+| Document | Covers |
+| --- | --- |
+| [api-reference.md](api-reference.md) | every HTTP endpoint |
+| [multi-inbound-client-plan.md](multi-inbound-client-plan.md) | accounts spanning several inbounds |
+| [control-plane-framework.md](control-plane-framework.md) | how a protocol is added to the control plane |
+| [device-limit-plan.md](device-limit-plan.md) | device caps and eviction strategies |
+| [ip-limiter-plan.md](ip-limiter-plan.md) | the IP limiter |
+| [speed-limit-plan.md](speed-limit-plan.md) | live speed limiting |
+| [reseller-plan.md](reseller-plan.md) | credit-based resellers |
+| [wireguard-plan.md](wireguard-plan.md), [amneziawg-plan.md](amneziawg-plan.md), [gre-plan.md](gre-plan.md), [ikev2-plan.md](ikev2-plan.md), [sstp-plan.md](sstp-plan.md), [openconnect-plan.md](openconnect-plan.md), [ssh-plan.md](ssh-plan.md) | one document per protocol |
+| [accounts-upgrade-guide.md](accounts-upgrade-guide.md) | the account model migration |
+
+---
+
+## Credits
+
+SR-UI is a fork of **vpn-ui** by Sir-MmD (github.com/Sir-MmD/vpn-ui), which is
+itself built on **3x-ui** by MHSanaei (github.com/MHSanaei/3x-ui). The proxy
+engine is **Xray-core** by the XTLS project (github.com/XTLS/Xray-core). Routing
+data comes from the v2ray-rules-dat project. Thanks to everyone whose work this
+builds on.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
+
+## Disclaimer
+
+This software is provided for lawful use only. You are responsible for complying
+with the laws and regulations that apply where you operate it.
