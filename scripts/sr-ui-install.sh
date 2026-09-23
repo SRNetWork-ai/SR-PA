@@ -21,6 +21,8 @@ BIN="$DEST/sr-ui"
 UNIT="/etc/systemd/system/sr-ui.service"
 MENU="/usr/bin/sr-ui"
 PROTO="https"
+# The panel serves plain HTTP until TLS is set up from inside the panel.
+SCHEME="http"
 API="${PROTO}://api.github.com/repos/${OWNER}/${REPO}"
 RAW="${PROTO}://raw.githubusercontent.com/${OWNER}/${REPO}/main"
 
@@ -378,11 +380,7 @@ obtain_binary() {
 			return 0
 			;;
 		401|403)
-			if [ -n "$TOKEN" ]; then
-				warn "GitHub refused the release request (${RELEASE_CODE}); the token may not read this repository, or its rate limit is spent"
-			else
-				warn "GitHub refused the release request (${RELEASE_CODE}); a private repository or a spent rate limit needs --token or GITHUB_TOKEN"
-			fi
+			warn "GitHub refused the release request (${RELEASE_CODE}); a private repository or a spent rate limit needs --token or GITHUB_TOKEN"
 			build_from_source
 			return 0
 			;;
@@ -465,9 +463,26 @@ WantedBy=multi-user.target
 EOF
 }
 
+# The menu that ships inside the binary resolves the panel through VPNUI_BIN and
+# otherwise falls back to the path upstream installs to. A binary built without
+# the rebrand therefore answers "panel binary not found" on a healthy install,
+# so pin the real path unless the menu already points at it.
+pin_menu_bin() {
+	if [ "$DRY_RUN" = "1" ] || [ ! -f "$MENU" ]; then
+		return 0
+	fi
+	if grep -q 'VPNUI_BIN' "$MENU" 2>/dev/null; then
+		if ! grep -q "$BIN" "$MENU" 2>/dev/null; then
+			sed -i "1a export VPNUI_BIN=$BIN" "$MENU"
+			info "menu pinned to $BIN"
+		fi
+	fi
+}
+
 install_menu() {
 	if bin_help "$BIN" | grep -q 'install-menu'; then
 		if run "$BIN" install-menu "$MENU"; then
+			pin_menu_bin
 			info "management command installed: $APP"
 			return 0
 		fi
@@ -542,16 +557,26 @@ health_check() {
 	return 1
 }
 
+# ifconfig.me answers over whichever family the server prefers, and a server that
+# prefers IPv6 produced an address no browser accepts: an IPv6 literal is only a
+# URL host inside brackets. Ask for IPv4 first, and bracket v6 when it is all
+# there is.
 public_address() {
-	local ip
-	ip="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+	local ip=""
+	ip="$(curl -4 -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
 	if [ -z "$ip" ]; then
 		ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
 	fi
 	if [ -z "$ip" ]; then
+		ip="$(curl -6 -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+	fi
+	if [ -z "$ip" ]; then
 		ip="<server-ip>"
 	fi
-	printf '%s' "$ip"
+	case "$ip" in
+		*:*) printf '[%s]' "$ip" ;;
+		*) printf '%s' "$ip" ;;
+	esac
 }
 
 do_uninstall() {
@@ -668,7 +693,7 @@ main() {
 	printf '\n'
 	printf '%s\n' "  SR-UI installed"
 	printf '%s\n' "  ---------------------------------------------"
-	printf '%s\n' "  address   ${addr}:${PANEL_PORT}/${PANEL_PATH}/"
+	printf '%s\n' "  address   ${SCHEME}://${addr}:${PANEL_PORT}/${PANEL_PATH}/"
 	printf '%s\n' "  username  ${PANEL_USER}"
 	printf '%s\n' "  password  ${PANEL_PASS}"
 	printf '%s\n' "  ---------------------------------------------"
