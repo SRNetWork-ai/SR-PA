@@ -83,13 +83,37 @@ so no migration step is required when upgrading.
 | Source | Status | Supplies |
 | --- | --- | --- |
 | Xray access log scan | shipped | account, address, timestamp |
-| SSH server | planned | client version banner as a real fingerprint |
+| SSH gateway | shipped | client version banner, a real per-client fingerprint |
 | OpenVPN | planned | `IV_PLAT` / `IV_GUI_VER` peer-info |
 | RADIUS (L2TP, PPTP, IKEv2) | planned | calling-station-id, which is a hardware address |
 
 The access log carries no client identity, so those sightings are identified by carrier or
 address and labelled accordingly. Only the protocols that genuinely expose a client
-identity will report a `fingerprint` kind.
+identity report a `fingerprint` kind.
+
+## The SSH User Limit counts devices
+
+The SSH gateway is the first place where device identity is **enforced**, not just
+recorded, because the handshake hands it a client identity for free.
+
+A device there is `sshDeviceKey`: the sanitised version banner within an address pool
+(/24 for IPv4, /64 for IPv6), falling back to the bare address when a client sends no
+usable banner - which is exactly the old behaviour, so unidentified clients are not
+quietly given a looser limit.
+
+| Case | Before | Now |
+| --- | --- | --- |
+| Phone re-dials onto a neighbouring carrier address | 2 devices, customer refused | 1 device |
+| Laptop and phone behind one home address | 1 device | 2 devices |
+| Phone jumps to a different carrier range | 2 devices | 2 devices (known gap) |
+| Two people sharing an account from one pool, same client app | 2 devices | 1 device (known gap) |
+
+Both gaps need per-address carrier data at admission time, and that is a lookup the
+connection path cannot block on. The banner is client-supplied and forgeable; it is used
+only for counting and labelling, never for authentication.
+
+Eviction is per device: when the strategy is `accept`, the oldest device loses **all** of
+its sessions, not one of them.
 
 ## API
 
@@ -115,9 +139,12 @@ operator disconnects a customer over a phone last seen a week ago.
 
 ## Current limits
 
-- The registry **reports**; it does not yet enforce. The enforced IP cap is still the
-  per-account number published to the patched core through `speedlimits.json`.
+- Enforcement is device-based **on the SSH gateway only**. For Xray protocols the
+  enforced cap is still the per-account address count published to the patched core
+  through `speedlimits.json`; the registry is reporting there, not deciding.
 - Access-log sightings depend on Xray's access log being enabled; the shipped template
   sets it to `none`.
 - Carrier names come from a built-in table plus PTR matching. Without enrichment, an
   operator with no PTR and no table entry is reported as unknown rather than guessed.
+- The panel UI does not yet render the registry; the data is reachable through the API
+  above.
