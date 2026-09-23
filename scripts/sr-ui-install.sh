@@ -1,0 +1,597 @@
+#!/usr/bin/env bash
+#
+# SR-UI installer.
+#
+#   bash sr-ui-install.sh              interactive install
+#   bash sr-ui-install.sh --yes        unattended, credentials generated
+#   bash sr-ui-install.sh --dry-run    print every action, change nothing
+#   bash sr-ui-install.sh --uninstall  remove the service, keep the database
+#
+# Design rule: detect, do not assume. The distro, the CPU, a free port, an existing
+# panel and the binary's own CLI surface are all discovered at run time. Anything that
+# cannot be verified is reported rather than guessed.
+
+set -euo pipefail
+
+OWNER="SRNetWork-ai"
+REPO="SR-PA"
+APP="sr-ui"
+DEST="/opt/sr-ui"
+BIN="$DEST/sr-ui"
+UNIT="/etc/systemd/system/sr-ui.service"
+MENU="/usr/bin/sr-ui"
+PROTO="https"
+API="${PROTO}://api.github.com/repos/${OWNER}/${REPO}"
+
+ASSUME_YES=0
+DRY_RUN=0
+DO_UNINSTALL=0
+PURGE=0
+USE_SOURCE=0
+SKIP_FIREWALL=0
+REQ_VERSION=""
+PANEL_PORT=""
+PANEL_USER=""
+PANEL_PASS=""
+PANEL_PATH=""
+ARCH=""
+OS_ID=""
+OS_FAMILY=""
+OS_NAME=""
+FETCHED_BIN=""
+WORKDIR=""
+
+C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_OFF=""
+if [ -t 2 ]; then
+	C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+fi
+
+# All logging goes to stderr so functions can return values on stdout.
+step() { printf '%s\n' "${C_DIM}==>${C_OFF} $*" >&2; }
+info() { printf '%s\n' "${C_OK}[ok]${C_OFF} $*" >&2; }
+warn() { printf '%s\n' "${C_WARN}[warn]${C_OFF} $*" >&2; }
+die()  { printf '%s\n' "${C_ERR}[error]${C_OFF} $*" >&2; exit 1; }
+
+run() {
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '%s\n' "${C_DIM}dry-run:${C_OFF} $*" >&2
+		return 0
+	fi
+	"$@"
+}
+
+cleanup() {
+	if [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
+		rm -rf "$WORKDIR"
+	fi
+}
+trap cleanup EXIT
+
+usage() {
+	cat <<'EOF'
+SR-UI installer
+
+  -y, --yes          do not ask anything; generate whatever is missing
+      --port N       panel port (default: a free random port)
+      --username U   panel user (default: generated)
+      --password P   panel password (default: generated)
+      --path P       panel web base path (default: generated)
+      --version TAG  install a specific release tag (default: latest)
+      --source       build from source instead of downloading a release
+      --no-firewall  do not touch ufw/firewalld
+      --dry-run      print what would happen, change nothing
+      --uninstall    stop and remove the panel, keep the database
+      --purge        with --uninstall, delete the database too
+  -h, --help         this text
+EOF
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-y|--yes) ASSUME_YES=1 ;;
+		--port) PANEL_PORT="${2:-}"; shift ;;
+		--username) PANEL_USER="${2:-}"; shift ;;
+		--password) PANEL_PASS="${2:-}"; shift ;;
+		--path) PANEL_PATH="${2:-}"; shift ;;
+		--version) REQ_VERSION="${2:-}"; shift ;;
+		--source) USE_SOURCE=1 ;;
+		--no-firewall) SKIP_FIREWALL=1 ;;
+		--dry-run) DRY_RUN=1 ;;
+		--uninstall) DO_UNINSTALL=1 ;;
+		--purge) PURGE=1 ;;
+		-h|--help) usage; exit 0 ;;
+		*) die "unknown option: $1 (try --help)" ;;
+	esac
+	shift
+done
+
+if [ "$(id -u)" != "0" ]; then
+	die "run this as root"
+fi
+
+detect_os() {
+	if [ ! -r /etc/os-release ]; then
+		die "/etc/os-release is missing; this system is not supported"
+	fi
+	# shellcheck disable=SC1091
+	. /etc/os-release
+	OS_ID="${ID:-unknown}"
+	OS_NAME="${PRETTY_NAME:-$OS_ID}"
+	case "${OS_ID} ${ID_LIKE:-}" in
+		*debian*|*ubuntu*) OS_FAMILY="debian" ;;
+		*rhel*|*fedora*|*centos*|*almalinux*|*rocky*) OS_FAMILY="rhel" ;;
+		*arch*) OS_FAMILY="arch" ;;
+		*suse*) OS_FAMILY="suse" ;;
+		*) OS_FAMILY="" ;;
+	esac
+}
+
+pkg_install() {
+	case "$OS_FAMILY" in
+		debian)
+			run env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+			run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
+			;;
+		rhel)
+			if command -v dnf >/dev/null 2>&1; then
+				run dnf install -y -q "$@"
+			else
+				run yum install -y -q "$@"
+			fi
+			;;
+		arch) run pacman -Sy --noconfirm "$@" ;;
+		suse) run zypper --non-interactive install "$@" ;;
+		*) warn "unrecognised package manager; install these yourself: $*" ;;
+	esac
+}
+
+detect_arch() {
+	case "$(uname -m)" in
+		x86_64|amd64) ARCH="amd64" ;;
+		aarch64|arm64) ARCH="arm64" ;;
+		armv7l|armv7) ARCH="armv7" ;;
+		armv6l) ARCH="armv6" ;;
+		s390x) ARCH="s390x" ;;
+		*) die "unsupported CPU architecture: $(uname -m)" ;;
+	esac
+}
+
+ensure_deps() {
+	local missing=""
+	local c
+	for c in curl tar; do
+		if ! command -v "$c" >/dev/null 2>&1; then
+			missing="$missing $c"
+		fi
+	done
+	if [ -n "$missing" ]; then
+		step "installing missing tools:$missing"
+		# shellcheck disable=SC2086
+		pkg_install $missing
+	fi
+	if ! command -v systemctl >/dev/null 2>&1; then
+		die "systemd is required and was not found"
+	fi
+}
+
+rand_str() {
+	local n="${1:-12}"
+	LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c "$n" || true
+}
+
+port_in_use() {
+	local p="$1"
+	if command -v ss >/dev/null 2>&1; then
+		ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$"
+	elif command -v netstat >/dev/null 2>&1; then
+		netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$"
+	else
+		return 1
+	fi
+}
+
+pick_port() {
+	local p tries=0
+	while [ "$tries" -lt 40 ]; do
+		p=$(( (RANDOM % 40000) + 20000 ))
+		if ! port_in_use "$p"; then
+			printf '%s' "$p"
+			return 0
+		fi
+		tries=$((tries + 1))
+	done
+	die "could not find a free port; pass --port"
+}
+
+existing_panels() {
+	local found="" svc
+	for svc in vpn-ui x-ui 3x-ui sr-ui; do
+		if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\\.service"; then
+			found="$found $svc"
+		fi
+	done
+	printf '%s' "${found# }"
+}
+
+release_json() {
+	local url="$API/releases/latest"
+	if [ -n "$REQ_VERSION" ]; then
+		url="$API/releases/tags/$REQ_VERSION"
+	fi
+	curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' "$url" 2>/dev/null || true
+}
+
+# Picks the download URL whose asset name mentions this architecture, ignoring
+# signature and checksum assets.
+asset_url() {
+	grep -o '"browser_download_url"[^"]*"[^"]*"' \
+		| sed 's/.*"\\(ht[^"]*\\)"/\\1/' \
+		| grep -i -- "$ARCH" \
+		| grep -vi 'sha256\\|\\.asc$\\|\\.sig$' \
+		| head -n 1
+}
+
+checksum_url() {
+	grep -o '"browser_download_url"[^"]*"[^"]*"' \
+		| sed 's/.*"\\(ht[^"]*\\)"/\\1/' \
+		| grep -i 'sha256\\|checksums' \
+		| head -n 1
+}
+
+verify_checksum() {
+	local file="$1" sums="$2" name want got
+	if [ ! -s "$sums" ]; then
+		warn "this release publishes no checksum; the download was NOT verified"
+		return 0
+	fi
+	if ! command -v sha256sum >/dev/null 2>&1; then
+		warn "sha256sum not available; the download was NOT verified"
+		return 0
+	fi
+	name="$(basename "$file")"
+	want="$(grep -F "$name" "$sums" | awk '{print $1}' | head -n 1)"
+	if [ -z "$want" ]; then
+		warn "no checksum entry for $name; the download was NOT verified"
+		return 0
+	fi
+	got="$(sha256sum "$file" | awk '{print $1}')"
+	if [ "$want" != "$got" ]; then
+		die "checksum mismatch for $name - refusing to install"
+	fi
+	info "checksum verified"
+}
+
+build_from_source() {
+	if ! command -v go >/dev/null 2>&1; then
+		die "cannot build from source: Go is not installed (install Go, or use a release with --version)"
+	fi
+	if ! command -v git >/dev/null 2>&1; then
+		pkg_install git
+	fi
+	step "building from source (this takes a few minutes)"
+	run git clone --depth 1 "${PROTO}://github.com/${OWNER}/${REPO}.git" "$WORKDIR/src"
+	if [ "$DRY_RUN" = "1" ]; then
+		FETCHED_BIN="$WORKDIR/${APP}"
+		return 0
+	fi
+	( cd "$WORKDIR/src" && go build -trimpath -ldflags "-s -w" -o "$WORKDIR/${APP}" . )
+	FETCHED_BIN="$WORKDIR/${APP}"
+}
+
+extract_binary() {
+	local file="$1" cand
+	case "$file" in
+		*.tar.gz|*.tgz) run tar -xzf "$file" -C "$WORKDIR" ;;
+		*.zip)
+			if ! command -v unzip >/dev/null 2>&1; then
+				pkg_install unzip
+			fi
+			run unzip -q -o "$file" -d "$WORKDIR"
+			;;
+		*)
+			chmod +x "$file"
+			FETCHED_BIN="$file"
+			return 0
+			;;
+	esac
+	cand="$(find "$WORKDIR" -type f -perm -u+x -o -type f -name '*ui*' 2>/dev/null | grep -v '\\.\\(tar\\.gz\\|tgz\\|zip\\|txt\\|json\\)$' | head -n 1)"
+	if [ -z "$cand" ]; then
+		die "no binary found inside the release asset"
+	fi
+	chmod +x "$cand"
+	FETCHED_BIN="$cand"
+}
+
+obtain_binary() {
+	local json url sums_url asset sums
+	if [ "$USE_SOURCE" = "1" ]; then
+		build_from_source
+		return 0
+	fi
+	step "looking for a release asset for $ARCH"
+	json="$(release_json)"
+	if [ -z "$json" ]; then
+		warn "could not reach the release API"
+		build_from_source
+		return 0
+	fi
+	url="$(printf '%s' "$json" | asset_url)"
+	if [ -z "$url" ]; then
+		warn "no published release asset matches $ARCH"
+		build_from_source
+		return 0
+	fi
+	asset="$WORKDIR/$(basename "$url")"
+	step "downloading $(basename "$url")"
+	run curl -fsSL --max-time 900 -o "$asset" "$url"
+	if [ "$DRY_RUN" = "1" ]; then
+		FETCHED_BIN="$asset"
+		return 0
+	fi
+	sums_url="$(printf '%s' "$json" | checksum_url)"
+	sums=""
+	if [ -n "$sums_url" ]; then
+		sums="$WORKDIR/checksums"
+		curl -fsSL --max-time 60 -o "$sums" "$sums_url" 2>/dev/null || sums=""
+	fi
+	verify_checksum "$asset" "$sums"
+	extract_binary "$asset"
+}
+
+# The panel's CLI differs between builds, so ask this binary what it supports rather
+# than hardcoding a subcommand that may not exist.
+bin_help() {
+	"$1" -h 2>&1 || true
+}
+
+exec_start_for() {
+	local bin="$1"
+	if bin_help "$bin" | grep -qE '^[[:space:]]*run([[:space:]]|$)'; then
+		printf '%s' "$bin run"
+	else
+		printf '%s' "$bin"
+	fi
+}
+
+write_unit() {
+	local execline="$1"
+	if [ "$DRY_RUN" = "1" ]; then
+		step "would write $UNIT with ExecStart=$execline"
+		return 0
+	fi
+	cat >"$UNIT" <<EOF
+[Unit]
+Description=SR-UI panel
+After=network.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$DEST
+ExecStart=$execline
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+install_menu() {
+	if bin_help "$BIN" | grep -q 'install-menu'; then
+		if run "$BIN" install-menu "$MENU"; then
+			info "management command installed: $APP"
+			return 0
+		fi
+		warn "the binary refused to install its menu; writing a minimal one"
+	fi
+	if [ "$DRY_RUN" = "1" ]; then
+		step "would write a minimal $MENU"
+		return 0
+	fi
+	cat >"$MENU" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-status}" in
+	start|stop|restart|status) systemctl "$1" sr-ui ;;
+	log) journalctl -u sr-ui -f --no-pager ;;
+	*) echo "usage: sr-ui {start|stop|restart|status|log}" ;;
+esac
+EOF
+	chmod +x "$MENU"
+	info "minimal management command installed: $APP"
+}
+
+apply_settings() {
+	local help args
+	help="$("$BIN" setting -h 2>&1 || true)"
+	args=""
+	if printf '%s' "$help" | grep -q -- '-username'; then
+		args="$args -username $PANEL_USER -password $PANEL_PASS"
+	fi
+	if printf '%s' "$help" | grep -q -- '-port'; then
+		args="$args -port $PANEL_PORT"
+	fi
+	if printf '%s' "$help" | grep -q -- '-webBasePath'; then
+		args="$args -webBasePath $PANEL_PATH"
+	fi
+	if [ -z "$args" ]; then
+		warn "this build exposes no 'setting' flags; set the port and credentials from the panel menu ($APP)"
+		return 0
+	fi
+	# shellcheck disable=SC2086
+	if ! run "$BIN" setting $args >/dev/null 2>&1; then
+		warn "applying settings failed; the panel keeps its previous credentials"
+		return 0
+	fi
+	info "panel port, base path and credentials applied"
+}
+
+open_firewall() {
+	if [ "$SKIP_FIREWALL" = "1" ]; then
+		return 0
+	fi
+	if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+		run ufw allow "${PANEL_PORT}/tcp" >/dev/null 2>&1 || warn "could not add the ufw rule"
+		info "opened ${PANEL_PORT}/tcp in ufw"
+	elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+		run firewall-cmd --permanent --add-port="${PANEL_PORT}/tcp" >/dev/null 2>&1 || warn "could not add the firewalld rule"
+		run firewall-cmd --reload >/dev/null 2>&1 || true
+		info "opened ${PANEL_PORT}/tcp in firewalld"
+	else
+		step "no active firewall detected; nothing to open"
+	fi
+}
+
+health_check() {
+	local i=0
+	while [ "$i" -lt 20 ]; do
+		if curl -fsS --max-time 3 -o /dev/null "127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/" 2>/dev/null; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+public_address() {
+	local ip
+	ip="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+	if [ -z "$ip" ]; then
+		ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
+	fi
+	if [ -z "$ip" ]; then
+		ip="<server-ip>"
+	fi
+	printf '%s' "$ip"
+}
+
+do_uninstall() {
+	step "removing $APP"
+	run systemctl stop "$APP" >/dev/null 2>&1 || true
+	run systemctl disable "$APP" >/dev/null 2>&1 || true
+	if [ -f "$UNIT" ]; then
+		run rm -f "$UNIT"
+	fi
+	run systemctl daemon-reload >/dev/null 2>&1 || true
+	run rm -f "$MENU"
+	if [ "$PURGE" = "1" ]; then
+		run rm -rf "$DEST"
+		warn "$DEST removed, including anything stored in it"
+	else
+		run rm -f "$BIN"
+		info "binary removed; $DEST kept"
+	fi
+	info "note: the database lives wherever this build puts it, which --purge does not touch unless it is under $DEST"
+}
+
+confirm_or_exit() {
+	if [ "$ASSUME_YES" = "1" ] || [ "$DRY_RUN" = "1" ]; then
+		return 0
+	fi
+	local reply=""
+	printf '%s' "continue? [y/N] " >&2
+	read -r reply || true
+	case "$reply" in
+		y|Y|yes|YES) return 0 ;;
+		*) die "aborted" ;;
+	esac
+}
+
+main() {
+	detect_os
+	detect_arch
+
+	if [ "$DO_UNINSTALL" = "1" ]; then
+		do_uninstall
+		exit 0
+	fi
+
+	ensure_deps
+	WORKDIR="$(mktemp -d)"
+
+	step "system: $OS_NAME ($OS_FAMILY), architecture: $ARCH"
+
+	local others
+	others="$(existing_panels)"
+	if [ -n "$others" ]; then
+		warn "already installed on this server:$others"
+		case "$others" in
+			*sr-ui*) step "this run will upgrade sr-ui in place and keep its data" ;;
+			*) warn "to move an existing panel to the SR-UI name instead, use scripts/srui-server-migrate.sh" ;;
+		esac
+		confirm_or_exit
+	fi
+
+	if [ -z "$PANEL_PORT" ]; then
+		PANEL_PORT="$(pick_port)"
+	elif port_in_use "$PANEL_PORT"; then
+		die "port $PANEL_PORT is already in use"
+	fi
+	[ -n "$PANEL_USER" ] || PANEL_USER="admin$(rand_str 4)"
+	[ -n "$PANEL_PASS" ] || PANEL_PASS="$(rand_str 16)"
+	[ -n "$PANEL_PATH" ] || PANEL_PATH="$(rand_str 10)"
+
+	obtain_binary
+
+	step "installing to $DEST"
+	run mkdir -p "$DEST"
+	if systemctl is-active --quiet "$APP" 2>/dev/null; then
+		run systemctl stop "$APP"
+	fi
+	if [ -f "$BIN" ]; then
+		run cp -f "$BIN" "$BIN.bak"
+		step "previous binary kept as $BIN.bak"
+	fi
+	run cp -f "$FETCHED_BIN" "$BIN"
+	run chmod +x "$BIN"
+
+	local execline
+	if [ "$DRY_RUN" = "1" ]; then
+		execline="$BIN run"
+	else
+		execline="$(exec_start_for "$BIN")"
+	fi
+	write_unit "$execline"
+	install_menu
+
+	if [ "$DRY_RUN" != "1" ]; then
+		apply_settings
+	fi
+
+	run systemctl daemon-reload
+	run systemctl enable "$APP" >/dev/null 2>&1 || warn "could not enable the service at boot"
+	run systemctl restart "$APP"
+	open_firewall
+
+	if [ "$DRY_RUN" = "1" ]; then
+		info "dry run finished; nothing was changed"
+		exit 0
+	fi
+
+	if health_check; then
+		info "panel is answering on port $PANEL_PORT"
+	else
+		warn "the panel did not answer yet - check: journalctl -u $APP -n 50 --no-pager"
+	fi
+
+	local addr
+	addr="$(public_address)"
+	printf '\n'
+	printf '%s\n' "  SR-UI installed"
+	printf '%s\n' "  ---------------------------------------------"
+	printf '%s\n' "  address   ${addr}:${PANEL_PORT}/${PANEL_PATH}/"
+	printf '%s\n' "  username  ${PANEL_USER}"
+	printf '%s\n' "  password  ${PANEL_PASS}"
+	printf '%s\n' "  ---------------------------------------------"
+	printf '%s\n' "  manage    ${APP}"
+	printf '%s\n' "  logs      journalctl -u ${APP} -f"
+	printf '\n'
+	warn "save the password now; it is not stored anywhere else by this script"
+	if [ "$PANEL_PATH" != "" ]; then
+		step "the base path is part of the address: without it the panel will not answer"
+	fi
+}
+
+main "$@"
