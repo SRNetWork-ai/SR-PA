@@ -12,6 +12,7 @@ import (
 	"github.com/mhsanaei/3x-ui/v2/database"
 	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/logger"
+	"github.com/mhsanaei/3x-ui/v2/web/service"
 	"github.com/mhsanaei/3x-ui/v2/xray"
 )
 
@@ -37,6 +38,12 @@ type IPWithTimestamp struct {
 //
 // So everything below is telemetry: it may be late, empty (the shipped access log default
 // is "none"), or plain absent without any effect on the limit that is actually applied.
+//
+// Since the device registry exists (web/service/devicesessions.go) this scan has a second
+// sink. It costs nothing extra: the parse already produces (account, address, when), and
+// the registry is the component that can say whether six addresses are six devices or one
+// phone on a mobile carrier. The flat address list is kept as-is because the modal still
+// renders it.
 type CheckClientIpJob struct {
 	lastClear int64
 }
@@ -52,6 +59,12 @@ var job *CheckClientIpJob
 // refreshes well inside the window) listed continuously, while an address that has really
 // stopped connecting drops off in bounded time instead of accumulating forever.
 const ipStaleAfterSeconds = int64(30 * 60)
+
+// deviceObservationsPerTick bounds how much the registry is asked to absorb from one
+// scan. A shared credential, or a log that went unread for a while, can otherwise hand a
+// 10-second job tens of thousands of sightings; the cap keeps this a telemetry sink
+// rather than something that can stall the scheduler. Newest sightings are kept.
+const deviceObservationsPerTick = 500
 
 // NewCheckClientIpJob creates a new client IP monitoring job instance.
 func NewCheckClientIpJob() *CheckClientIpJob {
@@ -102,6 +115,10 @@ func (j *CheckClientIpJob) clearAccessLog() {
 	j.checkError(err)
 
 	j.lastClear = time.Now().Unix()
+
+	// Device history expires on the same hourly beat rather than on a timer of its own:
+	// one less scheduled thing, and it runs where the job is already doing bookkeeping.
+	service.PruneDeviceSessions()
 }
 
 func (j *CheckClientIpJob) hasLimitIp() bool {
@@ -206,6 +223,48 @@ func (j *CheckClientIpJob) processLogFile() {
 
 		j.updateInboundClientIps(clientIpsRecord, email, ipsWithTime)
 	}
+
+	recordDeviceSightings(inboundClientIps)
+}
+
+// recordDeviceSightings hands this scan's (account, address, when) triples to the device
+// registry.
+//
+// Protocol is reported as "xray" and no fingerprint is supplied, because the access log
+// carries neither: a line says an address was accepted for an account and nothing about
+// what the client IS. The registry therefore identifies these by carrier or address, and
+// labels them as such rather than pretending to a fingerprint it was not given. The
+// protocols that DO expose a real client identity (the SSH version banner, OpenVPN
+// peer-info, the RADIUS calling-station-id) report it from their own services, where that
+// value actually exists.
+func recordDeviceSightings(seen map[string]map[string]int64) {
+	if len(seen) == 0 {
+		return
+	}
+
+	observations := make([]service.DeviceObservation, 0, 64)
+	for email, ipTimestamps := range seen {
+		for ip, ts := range ipTimestamps {
+			observations = append(observations, service.DeviceObservation{
+				Email:    email,
+				IP:       ip,
+				Protocol: "xray",
+				Seen:     ts,
+			})
+		}
+	}
+
+	if len(observations) > deviceObservationsPerTick {
+		// Newest first, then truncate: if something has to be dropped it should be the
+		// stale end, since the recent sightings are what any "is this account shared right
+		// now" question is asked about.
+		sort.Slice(observations, func(a, b int) bool {
+			return observations[a].Seen > observations[b].Seen
+		})
+		observations = observations[:deviceObservationsPerTick]
+	}
+
+	service.ObserveDevices(observations)
 }
 
 // mergeClientIps combines the persisted (old) and freshly observed (new)
