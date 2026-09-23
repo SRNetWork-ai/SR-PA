@@ -59,6 +59,13 @@ func (a *APIController) initRouter(g *gin.RouterGroup, customGeo *service.Custom
 	ipIntel.Use(requirePerm(model.PermAccessInbounds))
 	NewIPIntelController(ipIntel)
 
+	// Device registry: what is connected to an account, as opposed to which
+	// addresses were logged for it. Unlike /ipintel this DOES hold per-account
+	// data, so the routes inside are additionally guarded by requireClientAccess().
+	devices := api.Group("/devices")
+	devices.Use(requirePerm(model.PermAccessInbounds))
+	NewDeviceController(devices)
+
 	// Server API
 	server := api.Group("/server")
 	a.serverController = NewServerController(server)
