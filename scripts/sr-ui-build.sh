@@ -22,6 +22,7 @@ PROTO="https"
 GO_MIN_MAJOR=1
 GO_MIN_MINOR=21
 GO_FALLBACK="go1.23.6"
+MEM_TARGET_MB=4096
 
 REF="main"
 OUT=""
@@ -280,41 +281,57 @@ meminfo_mb() {
 	awk -v k="$1" '$1 == k":" {printf "%d", $2 / 1024; exit}' /proc/meminfo 2>/dev/null
 }
 
+number_or() {
+	case "${1:-x}" in
+		''|*[!0-9]*) printf '%s' "$2" ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
 ensure_space() {
 	local have
-	have="$(free_mb "$WORKDIR")"
-	case "${have:-x}" in
-		''|*[!0-9]*) warn "could not read the free disk space"; return 0 ;;
-	esac
+	have="$(number_or "$(free_mb "$WORKDIR")" 0)"
+	if [ "$have" = "0" ]; then
+		warn "could not read the free disk space"
+		return 0
+	fi
 	step "free disk space: ${have} MB"
-	if [ "$have" -lt 4096 ]; then
-		warn "this build wants roughly 4 GB free; ${have} MB may not be enough"
+	if [ "$have" -lt 5120 ]; then
+		warn "the clone, the module cache and a binary of a few hundred MB want roughly 5 GB; ${have} MB may not be enough"
 	fi
 }
 
-# The link step of a binary this size is what runs out of memory on a 1 GB server,
-# and the kernel kills it with a message that explains nothing. Say so first.
+# The link step of a binary this size is what dies on a small server, and the
+# kernel kills it with a message that explains nothing. Top the machine up to a
+# usable total instead of assuming a fixed 2 GB is enough, and only if the disk
+# can actually spare the space for the swap file plus the build itself.
 ensure_memory() {
-	local ram swap total file="/swapfile.sr-ui" size=2048
-	ram="$(meminfo_mb MemTotal)"
-	swap="$(meminfo_mb SwapTotal)"
-	case "${ram:-x}" in
-		''|*[!0-9]*) return 0 ;;
-	esac
-	case "${swap:-x}" in
-		''|*[!0-9]*) swap=0 ;;
-	esac
-	total=$((ram + swap))
-	step "memory: ${ram} MB RAM, ${swap} MB swap"
-	if [ "$total" -ge 2048 ]; then
+	local ram swap total size free file="/swapfile.sr-ui"
+	ram="$(number_or "$(meminfo_mb MemTotal)" 0)"
+	swap="$(number_or "$(meminfo_mb SwapTotal)" 0)"
+	if [ "$ram" = "0" ]; then
 		return 0
 	fi
+	total=$((ram + swap))
+	step "memory: ${ram} MB RAM, ${swap} MB swap"
+	if [ "$total" -ge "$MEM_TARGET_MB" ]; then
+		return 0
+	fi
+	size=$((MEM_TARGET_MB - total))
+	if [ "$size" -lt 1024 ]; then
+		size=1024
+	fi
 	if [ "$ALLOW_SWAP" != "1" ]; then
-		warn "the link step usually needs about 2 GB; with ${total} MB it can be killed. Re-run with --swap to add a temporary swap file"
+		warn "linking this binary usually needs around ${MEM_TARGET_MB} MB of RAM plus swap and this server has ${total} MB, so the build may be killed. Re-run with --swap to add ${size} MB of temporary swap"
 		return 0
 	fi
 	if [ "$DRY_RUN" = "1" ]; then
-		step "would add a temporary ${size} MB swap file"
+		step "would add a temporary ${size} MB swap file at ${file}"
+		return 0
+	fi
+	free="$(number_or "$(free_mb /)" 0)"
+	if [ "$free" != "0" ] && [ "$free" -lt $((size + 3072)) ]; then
+		warn "only ${free} MB free on /, which is not enough for ${size} MB of swap and the build; continuing without swap"
 		return 0
 	fi
 	step "adding a temporary ${size} MB swap file"
@@ -355,6 +372,10 @@ clone_source() {
 	run git -C "$WORKDIR/src" checkout --quiet "$REF"
 }
 
+killed_by_oom() {
+	dmesg 2>/dev/null | tail -n 80 | grep -qiE 'out of memory|oom-kill|killed process'
+}
+
 build_source() {
 	local gomod="$WORKDIR/src/go.mod" want=""
 	if [ -f "$gomod" ]; then
@@ -372,11 +393,16 @@ build_source() {
 	fi
 	mkdir -p "$(dirname "$OUT")"
 	step "building; on a small server this takes several minutes"
-	(
+	if ! (
 		cd "$WORKDIR/src"
 		export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
 		go build -trimpath -ldflags "-s -w" -o "$OUT" .
-	)
+	); then
+		if killed_by_oom; then
+			die "the kernel killed the build for running out of memory; re-run with --swap (or build on a machine with more RAM)"
+		fi
+		die "go build failed; the output above says why"
+	fi
 	if [ ! -s "$OUT" ]; then
 		die "the build reported success but produced no binary"
 	fi
