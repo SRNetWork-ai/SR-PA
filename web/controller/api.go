@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// APIController handles the main API routes for the vpn-ui panel, including inbounds and server management.
+// APIController handles the main API routes for the SR-UI panel, including inbounds and server management.
 type APIController struct {
 	BaseController
 	inboundController *InboundController
@@ -51,6 +51,13 @@ func (a *APIController) initRouter(g *gin.RouterGroup, customGeo *service.Custom
 	clients := api.Group("/clients")
 	clients.Use(requirePerm(model.PermAccessInbounds))
 	NewClientsController(clients)
+
+	// Source-address intelligence for the IP and device limit views. Same claim as
+	// the inbounds group, for the same reason: it annotates addresses the caller was
+	// already shown there, and holds no account data of its own to scope.
+	ipIntel := api.Group("/ipintel")
+	ipIntel.Use(requirePerm(model.PermAccessInbounds))
+	NewIPIntelController(ipIntel)
 
 	// Server API
 	server := api.Group("/server")
