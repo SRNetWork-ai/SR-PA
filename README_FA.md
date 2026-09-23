@@ -32,6 +32,21 @@ bash <(curl -fsSL raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-u
 bash sr-ui-install.sh --dry-run
 ```
 
+> اگر `curl` شما آدرس بدون اسکیم را قبول نکرد، `https://` را به ابتدای آن اضافه کنید.
+
+### تا وقتی مخزن خصوصی است
+
+دستور بالا فقط روی مخزن عمومی جواب می‌دهد. در حالت خصوصی، هم برداشتن خود اسکریپت و هم دسترسی اینستالر به ریلیز/سورس به توکن گیت‌هاب نیاز دارد:
+
+```bash
+export GITHUB_TOKEN=<your-token>
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-ui-install.sh -o sr-ui-install.sh
+bash sr-ui-install.sh --token "$GITHUB_TOKEN"
+```
+
+اینستالر `GITHUB_TOKEN` یا `GH_TOKEN` را هم خودش می‌خواند؛ `--token` فقط برای وقتی است که نمی‌خواهید متغیر محیطی بگذارید.
+
 ### گزینه‌های اینستالر
 
 | گزینه | کار |
@@ -41,6 +56,7 @@ bash sr-ui-install.sh --dry-run
 | `--username U` / `--password P` | مشخصات ورود |
 | `--path P` | مسیر پایهٔ وب |
 | `--version TAG` | نصب یک نسخهٔ مشخص |
+| `--token TOK` | توکن گیت‌هاب (تا وقتی مخزن خصوصی است) |
 | `--source` | بیلد از سورس، وقتی فایل آماده برای معماری شما نیست |
 | `--no-firewall` | دست نزدن به ufw / firewalld |
 | `--uninstall` | حذف سرویس، نگه داشتن دیتابیس |
@@ -55,7 +71,7 @@ bash sr-ui-install.sh --dry-run
 - **زیر-دستورهای همین باینری** (`run`، `install-menu`، `setting`) — به‌جای حدس زدن چیزی که شاید وجود نداشته باشد
 - **checksum**؛ و اگر ریلیز آن را منتشر نکرده باشد، صریح می‌گوید که فایل تأیید **نشده** است
 
-هر چیزی که نتواند مطمئن شود، گزارش می‌دهد؛ فرض نمی‌گیرد.
+هر چیزی که نتواند مطمئن شود، گزارش می‌دهد؛ فرض نمی‌گیرد. کل کارهای تغییردهنده هم داخل یک تابع است که فقط در خط آخر صدا زده می‌شود، تا اسکریپت نیمه‌دانلودشده نتواند نصب نیمه‌کاره بسازد.
 
 ---
 
