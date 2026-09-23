@@ -75,13 +75,19 @@ type sshServer struct {
 }
 
 // sshSession is one live authenticated SSH connection.
+//
+// fingerprint is the client's version banner (see ssh_device_identity.go) and devKey is
+// the identity the User Limit counts. They are captured once, at handshake, because that
+// is the only moment the banner is available.
 type sshSession struct {
-	inboundId int
-	email     string
-	srcIP     string
-	since     time.Time
-	conn      *ssh.ServerConn
-	acct      *sshAcct
+	inboundId   int
+	email       string
+	srcIP       string
+	fingerprint string
+	devKey      string
+	since       time.Time
+	conn        *ssh.ServerConn
+	acct        *sshAcct
 }
 
 // reconcile binds a listener for each enabled inbound and closes any that are no
@@ -228,13 +234,20 @@ func (m *sshManager) handleConn(srv *sshServer, nConn net.Conn) {
 	}
 	srcIP := hostOnly(nConn.RemoteAddr().String())
 
+	// The version banner is only readable from the completed handshake, so capture it
+	// here and carry it on the session: it is both the device identity the User Limit
+	// counts and the label the panel shows the operator.
+	fingerprint := sshClientFingerprint(sshConn.ClientVersion())
+
 	sess := &sshSession{
-		inboundId: srv.inboundId,
-		email:     email,
-		srcIP:     srcIP,
-		since:     time.Now(),
-		conn:      sshConn,
-		acct:      m.acctFor(srv.inboundId, email),
+		inboundId:   srv.inboundId,
+		email:       email,
+		srcIP:       srcIP,
+		fingerprint: fingerprint,
+		devKey:      sshDeviceKey(srcIP, fingerprint),
+		since:       time.Now(),
+		conn:        sshConn,
+		acct:        m.acctFor(srv.inboundId, email),
 	}
 
 	// User Limit: reject the (K+1)th distinct device, or admit and evict the oldest.
@@ -249,6 +262,10 @@ func (m *sshManager) handleConn(srv *sshServer, nConn net.Conn) {
 	for _, e := range evicted {
 		e.conn.Close()
 	}
+
+	// Admitted sessions are reported to the device registry. Only after admission: a
+	// refused connection is not a device the account is using.
+	sshObserveDevice(email, srcIP, fingerprint, srv.inboundId)
 
 	// Reject every global request (WantReply -> false). This denies reverse
 	// forwarding (tcpip-forward) and everything else; only direct-tcpip channels below
@@ -383,10 +400,15 @@ func copyCount(dst io.Writer, src io.Reader, ctr *atomic.Int64) {
 	}
 }
 
-// admit applies the User Limit for one account. A device is a distinct client source
-// IP. A new session from a known device is always allowed. A new device is allowed
-// while under K; at K, "reject" refuses it and "accept" admits it and evicts the
+// admit applies the User Limit for one account. A device is sshDeviceKey: the client's
+// version banner within an address pool, or the bare address when the client sent no
+// usable banner. A new session from a known device is always allowed. A new device is
+// allowed while under K; at K, "reject" refuses it and "accept" admits it and evicts the
 // oldest device (all its sessions). k <= 0 means unlimited.
+//
+// Counting devices rather than addresses is what stops a phone from burning a slot every
+// time its carrier moves it, which was the common way for a customer inside their limit
+// to be refused.
 func (m *sshManager) admit(sess *sshSession, k int, strategy string) (evicted []*sshSession, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -397,14 +419,14 @@ func (m *sshManager) admit(sess *sshSession, k int, strategy string) (evicted []
 		m.sessions[sess.email] = set
 	}
 
-	ipFirst := map[string]time.Time{}
+	devFirst := map[string]time.Time{}
 	for s := range set {
-		if t, seen := ipFirst[s.srcIP]; !seen || s.since.Before(t) {
-			ipFirst[s.srcIP] = s.since
+		if t, seen := devFirst[s.devKey]; !seen || s.since.Before(t) {
+			devFirst[s.devKey] = s.since
 		}
 	}
-	_, sameDevice := ipFirst[sess.srcIP]
-	if k <= 0 || sameDevice || len(ipFirst) < k {
+	_, sameDevice := devFirst[sess.devKey]
+	if k <= 0 || sameDevice || len(devFirst) < k {
 		set[sess] = struct{}{}
 		return nil, true
 	}
@@ -412,16 +434,16 @@ func (m *sshManager) admit(sess *sshSession, k int, strategy string) (evicted []
 		return nil, false
 	}
 
-	// accept: evict the oldest device (all sessions sharing its source IP).
-	oldestIP := ""
+	// accept: evict the oldest device (all its sessions).
+	oldestKey := ""
 	var oldestT time.Time
-	for ip, t := range ipFirst {
-		if oldestIP == "" || t.Before(oldestT) {
-			oldestIP, oldestT = ip, t
+	for key, t := range devFirst {
+		if oldestKey == "" || t.Before(oldestT) {
+			oldestKey, oldestT = key, t
 		}
 	}
 	for s := range set {
-		if s.srcIP == oldestIP {
+		if s.devKey == oldestKey {
 			evicted = append(evicted, s)
 			delete(set, s)
 		}
@@ -493,32 +515,32 @@ func (m *sshManager) enforce(svc *SshService, disabled map[string]bool) {
 			continue
 		}
 		inboundId := 0
-		ipFirst := map[string]time.Time{}
+		devFirst := map[string]time.Time{}
 		for s := range set {
 			inboundId = s.inboundId
-			if t, seen := ipFirst[s.srcIP]; !seen || s.since.Before(t) {
-				ipFirst[s.srcIP] = s.since
+			if t, seen := devFirst[s.devKey]; !seen || s.since.Before(t) {
+				devFirst[s.devKey] = s.since
 			}
 		}
 		k, _ := svc.accountLimit(inboundId, email)
-		if k <= 0 || len(ipFirst) <= k {
+		if k <= 0 || len(devFirst) <= k {
 			continue
 		}
-		type ipt struct {
-			ip string
-			t  time.Time
+		type devt struct {
+			key string
+			t   time.Time
 		}
-		arr := make([]ipt, 0, len(ipFirst))
-		for ip, t := range ipFirst {
-			arr = append(arr, ipt{ip, t})
+		arr := make([]devt, 0, len(devFirst))
+		for key, t := range devFirst {
+			arr = append(arr, devt{key, t})
 		}
 		sort.Slice(arr, func(i, j int) bool { return arr[i].t.Before(arr[j].t) })
-		evictIP := map[string]bool{}
+		evictKey := map[string]bool{}
 		for _, e := range arr[:len(arr)-k] {
-			evictIP[e.ip] = true
+			evictKey[e.key] = true
 		}
 		for s := range set {
-			if evictIP[s.srcIP] {
+			if evictKey[s.devKey] {
 				toClose = append(toClose, s)
 			}
 		}
