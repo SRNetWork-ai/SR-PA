@@ -40,6 +40,8 @@ OS_FAMILY=""
 OS_NAME=""
 FETCHED_BIN=""
 WORKDIR=""
+HELP_TIMEOUT=""
+TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_OFF=""
 if [ -t 2 ]; then
@@ -77,6 +79,8 @@ SR-UI installer
       --password P   panel password (default: generated)
       --path P       panel web base path (default: generated)
       --version TAG  install a specific release tag (default: latest)
+      --token TOK    GitHub token, needed while the repository is private
+                     (GITHUB_TOKEN or GH_TOKEN work too)
       --source       build from source instead of downloading a release
       --no-firewall  do not touch ufw/firewalld
       --dry-run      print what would happen, change nothing
@@ -94,6 +98,7 @@ while [ $# -gt 0 ]; do
 		--password) PANEL_PASS="${2:-}"; shift ;;
 		--path) PANEL_PATH="${2:-}"; shift ;;
 		--version) REQ_VERSION="${2:-}"; shift ;;
+		--token) TOKEN="${2:-}"; shift ;;
 		--source) USE_SOURCE=1 ;;
 		--no-firewall) SKIP_FIREWALL=1 ;;
 		--dry-run) DRY_RUN=1 ;;
@@ -107,6 +112,10 @@ done
 
 if [ "$(id -u)" != "0" ]; then
 	die "run this as root"
+fi
+
+if command -v timeout >/dev/null 2>&1; then
+	HELP_TIMEOUT="timeout 10"
 fi
 
 detect_os() {
@@ -182,9 +191,9 @@ rand_str() {
 port_in_use() {
 	local p="$1"
 	if command -v ss >/dev/null 2>&1; then
-		ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$"
+		ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}"'$'
 	elif command -v netstat >/dev/null 2>&1; then
-		netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$"
+		netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}"'$'
 	else
 		return 1
 	fi
@@ -206,11 +215,19 @@ pick_port() {
 existing_panels() {
 	local found="" svc
 	for svc in vpn-ui x-ui 3x-ui sr-ui; do
-		if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\\.service"; then
+		if systemctl list-unit-files 2>/dev/null | grep -qE "^${svc}[.]service"; then
 			found="$found $svc"
 		fi
 	done
 	printf '%s' "${found# }"
+}
+
+api_curl() {
+	if [ -n "$TOKEN" ]; then
+		curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $TOKEN" "$@"
+	else
+		curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' "$@"
+	fi
 }
 
 release_json() {
@@ -218,24 +235,22 @@ release_json() {
 	if [ -n "$REQ_VERSION" ]; then
 		url="$API/releases/tags/$REQ_VERSION"
 	fi
-	curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' "$url" 2>/dev/null || true
+	api_curl "$url" 2>/dev/null || true
 }
 
-# Picks the download URL whose asset name mentions this architecture, ignoring
-# signature and checksum assets.
+# Every download URL in the release payload, one per line. Field 4 of a quote
+# separated "browser_download_url":"..." pair is the URL itself, with or without
+# a space after the colon - no regex escaping needed, which is the point.
+release_urls() {
+	grep -o '"browser_download_url"[^"]*"[^"]*"' | cut -d'"' -f4
+}
+
 asset_url() {
-	grep -o '"browser_download_url"[^"]*"[^"]*"' \
-		| sed 's/.*"\\(ht[^"]*\\)"/\\1/' \
-		| grep -i -- "$ARCH" \
-		| grep -vi 'sha256\\|\\.asc$\\|\\.sig$' \
-		| head -n 1
+	release_urls | grep -i -- "$ARCH" | grep -viE 'sha256|checksum|[.](asc|sig)$' | head -n 1
 }
 
 checksum_url() {
-	grep -o '"browser_download_url"[^"]*"[^"]*"' \
-		| sed 's/.*"\\(ht[^"]*\\)"/\\1/' \
-		| grep -i 'sha256\\|checksums' \
-		| head -n 1
+	release_urls | grep -iE 'sha256|checksums' | head -n 1
 }
 
 verify_checksum() {
@@ -262,14 +277,23 @@ verify_checksum() {
 }
 
 build_from_source() {
+	local repo_url="${PROTO}://github.com/${OWNER}/${REPO}.git"
 	if ! command -v go >/dev/null 2>&1; then
-		die "cannot build from source: Go is not installed (install Go, or use a release with --version)"
+		die "cannot build from source: Go is not installed (install Go, or install a release with --version)"
 	fi
 	if ! command -v git >/dev/null 2>&1; then
 		pkg_install git
 	fi
+	if [ -n "$TOKEN" ]; then
+		repo_url="${PROTO}://x-access-token:${TOKEN}@github.com/${OWNER}/${REPO}.git"
+	fi
 	step "building from source (this takes a few minutes)"
-	run git clone --depth 1 "${PROTO}://github.com/${OWNER}/${REPO}.git" "$WORKDIR/src"
+	if ! run git clone --depth 1 "$repo_url" "$WORKDIR/src"; then
+		if [ -z "$TOKEN" ]; then
+			die "clone failed - if ${OWNER}/${REPO} is private, pass --token or set GITHUB_TOKEN"
+		fi
+		die "clone failed even with a token - check that the token can read ${OWNER}/${REPO}"
+	fi
 	if [ "$DRY_RUN" = "1" ]; then
 		FETCHED_BIN="$WORKDIR/${APP}"
 		return 0
@@ -294,7 +318,10 @@ extract_binary() {
 			return 0
 			;;
 	esac
-	cand="$(find "$WORKDIR" -type f -perm -u+x -o -type f -name '*ui*' 2>/dev/null | grep -v '\\.\\(tar\\.gz\\|tgz\\|zip\\|txt\\|json\\)$' | head -n 1)"
+	cand="$(find "$WORKDIR" -type f -name '*ui*' 2>/dev/null | grep -viE '[.](tar[.]gz|tgz|zip|txt|json|sha256|asc|sig)$' | head -n 1)"
+	if [ -z "$cand" ]; then
+		cand="$(find "$WORKDIR" -type f -perm -u+x 2>/dev/null | head -n 1)"
+	fi
 	if [ -z "$cand" ]; then
 		die "no binary found inside the release asset"
 	fi
@@ -311,7 +338,11 @@ obtain_binary() {
 	step "looking for a release asset for $ARCH"
 	json="$(release_json)"
 	if [ -z "$json" ]; then
-		warn "could not reach the release API"
+		if [ -z "$TOKEN" ]; then
+			warn "no readable release (a private repository needs --token or GITHUB_TOKEN)"
+		else
+			warn "could not reach the release API"
+		fi
 		build_from_source
 		return 0
 	fi
@@ -323,7 +354,11 @@ obtain_binary() {
 	fi
 	asset="$WORKDIR/$(basename "$url")"
 	step "downloading $(basename "$url")"
-	run curl -fsSL --max-time 900 -o "$asset" "$url"
+	if ! run api_curl --max-time 900 -o "$asset" "$url"; then
+		warn "download failed; falling back to a source build"
+		build_from_source
+		return 0
+	fi
 	if [ "$DRY_RUN" = "1" ]; then
 		FETCHED_BIN="$asset"
 		return 0
@@ -332,16 +367,22 @@ obtain_binary() {
 	sums=""
 	if [ -n "$sums_url" ]; then
 		sums="$WORKDIR/checksums"
-		curl -fsSL --max-time 60 -o "$sums" "$sums_url" 2>/dev/null || sums=""
+		api_curl --max-time 60 -o "$sums" "$sums_url" 2>/dev/null || sums=""
 	fi
 	verify_checksum "$asset" "$sums"
 	extract_binary "$asset"
 }
 
 # The panel's CLI differs between builds, so ask this binary what it supports rather
-# than hardcoding a subcommand that may not exist.
+# than hardcoding a subcommand that may not exist. A build that ignores unknown flags
+# would start serving instead of printing help, so this never runs unbounded.
 bin_help() {
-	"$1" -h 2>&1 || true
+	if [ -n "$HELP_TIMEOUT" ]; then
+		# shellcheck disable=SC2086
+		$HELP_TIMEOUT "$@" -h 2>&1 || true
+	else
+		"$@" -h 2>&1 || true
+	fi
 }
 
 exec_start_for() {
@@ -404,7 +445,7 @@ EOF
 
 apply_settings() {
 	local help args
-	help="$("$BIN" setting -h 2>&1 || true)"
+	help="$(bin_help "$BIN" setting)"
 	args=""
 	if printf '%s' "$help" | grep -q -- '-username'; then
 		args="$args -username $PANEL_USER -password $PANEL_PASS"
