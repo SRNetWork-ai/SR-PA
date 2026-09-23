@@ -67,6 +67,20 @@ func sshDeviceKey(srcIP, fingerprint string) string {
 	return fingerprint + "@" + sshIpPoolBucket(srcIP)
 }
 
+// deviceKey is the only way the limit code should ask a session what device it is.
+//
+// The stored key is filled in by the handshake, so reading the field directly would
+// yield "" for a session built any other way - and because an empty key is shared, an
+// account's sessions would all collapse into a single device and the limit would quietly
+// stop counting. Recomputing from the session's own fields keeps that impossible: with
+// no fingerprint the answer is the source address, which is what the limit used before.
+func (s *sshSession) deviceKey() string {
+	if s.devKey != "" {
+		return s.devKey
+	}
+	return sshDeviceKey(s.srcIP, s.fingerprint)
+}
+
 // sshIpPoolBucket collapses an address into the block its provider hands out from:
 // /24 for IPv4, /64 for IPv6 (one subscriber's delegated prefix).
 func sshIpPoolBucket(ip string) string {

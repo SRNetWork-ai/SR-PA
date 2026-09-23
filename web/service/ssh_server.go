@@ -77,8 +77,9 @@ type sshServer struct {
 // sshSession is one live authenticated SSH connection.
 //
 // fingerprint is the client's version banner (see ssh_device_identity.go) and devKey is
-// the identity the User Limit counts. They are captured once, at handshake, because that
-// is the only moment the banner is available.
+// the identity the User Limit counts, both captured at handshake because that is the
+// only moment the banner is available. Read the identity through deviceKey(), never off
+// the field: a session built outside the handshake has neither set.
 type sshSession struct {
 	inboundId   int
 	email       string
@@ -421,11 +422,12 @@ func (m *sshManager) admit(sess *sshSession, k int, strategy string) (evicted []
 
 	devFirst := map[string]time.Time{}
 	for s := range set {
-		if t, seen := devFirst[s.devKey]; !seen || s.since.Before(t) {
-			devFirst[s.devKey] = s.since
+		key := s.deviceKey()
+		if t, seen := devFirst[key]; !seen || s.since.Before(t) {
+			devFirst[key] = s.since
 		}
 	}
-	_, sameDevice := devFirst[sess.devKey]
+	_, sameDevice := devFirst[sess.deviceKey()]
 	if k <= 0 || sameDevice || len(devFirst) < k {
 		set[sess] = struct{}{}
 		return nil, true
@@ -443,7 +445,7 @@ func (m *sshManager) admit(sess *sshSession, k int, strategy string) (evicted []
 		}
 	}
 	for s := range set {
-		if s.devKey == oldestKey {
+		if s.deviceKey() == oldestKey {
 			evicted = append(evicted, s)
 			delete(set, s)
 		}
@@ -518,8 +520,9 @@ func (m *sshManager) enforce(svc *SshService, disabled map[string]bool) {
 		devFirst := map[string]time.Time{}
 		for s := range set {
 			inboundId = s.inboundId
-			if t, seen := devFirst[s.devKey]; !seen || s.since.Before(t) {
-				devFirst[s.devKey] = s.since
+			key := s.deviceKey()
+			if t, seen := devFirst[key]; !seen || s.since.Before(t) {
+				devFirst[key] = s.since
 			}
 		}
 		k, _ := svc.accountLimit(inboundId, email)
@@ -540,7 +543,7 @@ func (m *sshManager) enforce(svc *SshService, disabled map[string]bool) {
 			evictKey[e.key] = true
 		}
 		for s := range set {
-			if evictKey[s.devKey] {
+			if evictKey[s.deviceKey()] {
 				toClose = append(toClose, s)
 			}
 		}
