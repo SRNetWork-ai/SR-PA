@@ -22,6 +22,7 @@ UNIT="/etc/systemd/system/sr-ui.service"
 MENU="/usr/bin/sr-ui"
 PROTO="https"
 API="${PROTO}://api.github.com/repos/${OWNER}/${REPO}"
+RAW="${PROTO}://raw.githubusercontent.com/${OWNER}/${REPO}/main"
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -29,6 +30,7 @@ DO_UNINSTALL=0
 PURGE=0
 USE_SOURCE=0
 SKIP_FIREWALL=0
+ALLOW_SWAP=0
 REQ_VERSION=""
 PANEL_PORT=""
 PANEL_USER=""
@@ -41,6 +43,8 @@ OS_NAME=""
 FETCHED_BIN=""
 WORKDIR=""
 HELP_TIMEOUT=""
+RELEASE_FILE=""
+RELEASE_CODE=""
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_OFF=""
@@ -79,9 +83,10 @@ SR-UI installer
       --password P   panel password (default: generated)
       --path P       panel web base path (default: generated)
       --version TAG  install a specific release tag (default: latest)
-      --token TOK    GitHub token, needed while the repository is private
+      --token TOK    GitHub token, for a private repository or a spent rate limit
                      (GITHUB_TOKEN or GH_TOKEN work too)
       --source       build from source instead of downloading a release
+      --swap         allow a temporary swap file if RAM is too small to build
       --no-firewall  do not touch ufw/firewalld
       --dry-run      print what would happen, change nothing
       --uninstall    stop and remove the panel, keep the database
@@ -100,6 +105,7 @@ while [ $# -gt 0 ]; do
 		--version) REQ_VERSION="${2:-}"; shift ;;
 		--token) TOKEN="${2:-}"; shift ;;
 		--source) USE_SOURCE=1 ;;
+		--swap) ALLOW_SWAP=1 ;;
 		--no-firewall) SKIP_FIREWALL=1 ;;
 		--dry-run) DRY_RUN=1 ;;
 		--uninstall) DO_UNINSTALL=1 ;;
@@ -230,12 +236,26 @@ api_curl() {
 	fi
 }
 
-release_json() {
+# Saves the body and prints the HTTP status. -f is deliberately absent here: the
+# status is the answer, and "missing" and "refused" are different problems with
+# different fixes. Guessing between them is how the old message lied.
+api_status() {
+	local out="$1" url="$2" code=""
+	if [ -n "$TOKEN" ]; then
+		code="$(curl -sSL --max-time 30 -o "$out" -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $TOKEN" "$url" 2>/dev/null || true)"
+	else
+		code="$(curl -sSL --max-time 30 -o "$out" -w '%{http_code}' -H 'Accept: application/vnd.github+json' "$url" 2>/dev/null || true)"
+	fi
+	printf '%s' "${code:-000}"
+}
+
+fetch_release() {
 	local url="$API/releases/latest"
 	if [ -n "$REQ_VERSION" ]; then
 		url="$API/releases/tags/$REQ_VERSION"
 	fi
-	api_curl "$url" 2>/dev/null || true
+	RELEASE_FILE="$WORKDIR/release.json"
+	RELEASE_CODE="$(api_status "$RELEASE_FILE" "$url")"
 }
 
 # Every download URL in the release payload, one per line. Field 4 of a quote
@@ -276,30 +296,39 @@ verify_checksum() {
 	info "checksum verified"
 }
 
+# A source build needs a Go toolchain, disk space and enough RAM to link a large
+# binary, so it lives in its own script that can install and check all three. Use
+# the copy next to this file when there is one; otherwise fetch it.
 build_from_source() {
-	local repo_url="${PROTO}://github.com/${OWNER}/${REPO}.git"
-	if ! command -v go >/dev/null 2>&1; then
-		die "cannot build from source: Go is not installed (install Go, or install a release with --version)"
+	local helper="" here="" args=""
+	here="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd || true)"
+	if [ -n "$here" ] && [ -f "$here/sr-ui-build.sh" ]; then
+		helper="$here/sr-ui-build.sh"
+	else
+		helper="$WORKDIR/sr-ui-build.sh"
+		step "fetching the source builder"
+		if ! curl -fsSL --max-time 60 -o "$helper" "$RAW/scripts/sr-ui-build.sh"; then
+			die "could not fetch scripts/sr-ui-build.sh from ${OWNER}/${REPO}"
+		fi
 	fi
-	if ! command -v git >/dev/null 2>&1; then
-		pkg_install git
+	FETCHED_BIN="$WORKDIR/${APP}"
+	args="--out $FETCHED_BIN --repo ${OWNER}/${REPO}"
+	if [ -n "$REQ_VERSION" ]; then
+		args="$args --ref $REQ_VERSION"
 	fi
 	if [ -n "$TOKEN" ]; then
-		repo_url="${PROTO}://x-access-token:${TOKEN}@github.com/${OWNER}/${REPO}.git"
+		args="$args --token $TOKEN"
 	fi
-	step "building from source (this takes a few minutes)"
-	if ! run git clone --depth 1 "$repo_url" "$WORKDIR/src"; then
-		if [ -z "$TOKEN" ]; then
-			die "clone failed - if ${OWNER}/${REPO} is private, pass --token or set GITHUB_TOKEN"
-		fi
-		die "clone failed even with a token - check that the token can read ${OWNER}/${REPO}"
+	if [ "$ALLOW_SWAP" = "1" ]; then
+		args="$args --swap"
 	fi
 	if [ "$DRY_RUN" = "1" ]; then
-		FETCHED_BIN="$WORKDIR/${APP}"
-		return 0
+		args="$args --dry-run"
 	fi
-	( cd "$WORKDIR/src" && go build -trimpath -ldflags "-s -w" -o "$WORKDIR/${APP}" . )
-	FETCHED_BIN="$WORKDIR/${APP}"
+	# shellcheck disable=SC2086
+	if ! bash "$helper" $args >/dev/null; then
+		die "the source build failed; run it alone to see everything it says: bash $helper --out /tmp/${APP} --swap"
+	fi
 }
 
 extract_binary() {
@@ -330,25 +359,42 @@ extract_binary() {
 }
 
 obtain_binary() {
-	local json url sums_url asset sums
+	local url sums_url asset sums
 	if [ "$USE_SOURCE" = "1" ]; then
 		build_from_source
 		return 0
 	fi
 	step "looking for a release asset for $ARCH"
-	json="$(release_json)"
-	if [ -z "$json" ]; then
-		if [ -z "$TOKEN" ]; then
-			warn "no readable release (a private repository needs --token or GITHUB_TOKEN)"
-		else
-			warn "could not reach the release API"
-		fi
-		build_from_source
-		return 0
-	fi
-	url="$(printf '%s' "$json" | asset_url)"
+	fetch_release
+	case "$RELEASE_CODE" in
+		200) : ;;
+		404)
+			if [ -n "$REQ_VERSION" ]; then
+				warn "${OWNER}/${REPO} has no release tagged ${REQ_VERSION}"
+			else
+				warn "${OWNER}/${REPO} publishes no release yet - a fork does not inherit the releases of the project it came from, so the panel is built from source instead"
+			fi
+			build_from_source
+			return 0
+			;;
+		401|403)
+			if [ -n "$TOKEN" ]; then
+				warn "GitHub refused the release request (${RELEASE_CODE}); the token may not read this repository, or its rate limit is spent"
+			else
+				warn "GitHub refused the release request (${RELEASE_CODE}); a private repository or a spent rate limit needs --token or GITHUB_TOKEN"
+			fi
+			build_from_source
+			return 0
+			;;
+		*)
+			warn "could not read the release API (status ${RELEASE_CODE})"
+			build_from_source
+			return 0
+			;;
+	esac
+	url="$(asset_url <"$RELEASE_FILE")"
 	if [ -z "$url" ]; then
-		warn "no published release asset matches $ARCH"
+		warn "the latest release has no asset matching ${ARCH}; building from source instead"
 		build_from_source
 		return 0
 	fi
@@ -363,7 +409,7 @@ obtain_binary() {
 		FETCHED_BIN="$asset"
 		return 0
 	fi
-	sums_url="$(printf '%s' "$json" | checksum_url)"
+	sums_url="$(checksum_url <"$RELEASE_FILE")"
 	sums=""
 	if [ -n "$sums_url" ]; then
 		sums="$WORKDIR/checksums"
