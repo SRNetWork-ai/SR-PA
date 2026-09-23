@@ -6,10 +6,17 @@
 #   bash sr-ui-build.sh --out /tmp/sr-ui   build to a chosen path
 #   bash sr-ui-build.sh --ref v1.2.3       build a tag or branch
 #   bash sr-ui-build.sh --swap             add temporary swap on a small server
+#   bash sr-ui-build.sh --no-brand         keep the upstream vpn-ui identity
 #
 # The installer calls this when no release asset exists for the running
 # architecture, which is the normal case for a fork: forks do not inherit the
 # releases of the project they came from. It also runs perfectly well on its own.
+#
+# The rebrand happens HERE, on the source, before the compiler sees it. The
+# management menu, the unit name and the display name are compiled into the
+# binary, so a build that skips scripts/brand-sr-ui.sh installs a vpn-ui menu
+# that looks for the panel in /opt/vpn-ui - which is what a fresh install
+# answering "panel binary not found" actually means.
 #
 # Logs go to stderr. The only thing on stdout is the path of the finished binary.
 
@@ -23,6 +30,9 @@ GO_MIN_MAJOR=1
 GO_MIN_MINOR=21
 GO_FALLBACK="go1.23.6"
 MEM_TARGET_MB=4096
+# Where the installer puts the panel. The menu inside the binary resolves the
+# panel from this path, so both sides have to agree on one value.
+INSTALL_BIN="/opt/sr-ui/sr-ui"
 
 REF="main"
 OUT=""
@@ -30,6 +40,8 @@ TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 ALLOW_SWAP=0
 DRY_RUN=0
 KEEP_SRC=0
+BRAND=1
+BRANDED=0
 WORKDIR=""
 SWAPFILE=""
 OS_FAMILY=""
@@ -66,6 +78,7 @@ SR-UI source builder
       --repo O/R    build another fork (default: SRNetWork-ai/SR-PA)
       --token TOK   GitHub token, for a private repository
       --swap        create a temporary swap file when RAM is too small
+      --no-brand    build without the SR-UI rebrand (upstream vpn-ui identity)
       --keep-src    keep the cloned source instead of deleting it
       --dry-run     print what would happen, change nothing
   -h, --help        this text
@@ -85,6 +98,7 @@ while [ $# -gt 0 ]; do
 			;;
 		--token) TOKEN="${2:-}"; shift ;;
 		--swap) ALLOW_SWAP=1 ;;
+		--no-brand) BRAND=0 ;;
 		--keep-src) KEEP_SRC=1 ;;
 		--dry-run) DRY_RUN=1 ;;
 		-h|--help) usage; exit 0 ;;
@@ -372,8 +386,55 @@ clone_source() {
 	run git -C "$WORKDIR/src" checkout --quiet "$REF"
 }
 
+# The identity is compiled in, so it has to be fixed in the source tree. The
+# rebrand script deliberately keeps /opt/vpn-ui, /etc/vpn-ui and the database
+# name, because those are data paths an in-place upgrade must not lose - which
+# leaves the menu looking for the panel at the upstream location. This install
+# uses INSTALL_BIN, so the menu is pointed there after the rebrand runs.
+brand_source() {
+	local dir="$WORKDIR/src" script="scripts/brand-sr-ui.sh" menu
+	if [ "$BRAND" != "1" ]; then
+		warn "building without the rebrand: the panel will call itself vpn-ui"
+		return 0
+	fi
+	if [ ! -f "$dir/$script" ]; then
+		warn "$script is not in this tree; building unbranded"
+		return 0
+	fi
+	if [ "$DRY_RUN" = "1" ]; then
+		step "would run $script and point the menu at $INSTALL_BIN"
+		return 0
+	fi
+	step "rebranding the source to SR-UI"
+	if ! ( cd "$dir" && SR_REPO="${OWNER}/${REPO}" bash "$script" >/dev/null 2>&1 ); then
+		warn "the rebrand script failed; building unbranded"
+		return 0
+	fi
+	BRANDED=1
+	for menu in "$dir/sr-ui.sh" "$dir/vpn-ui.sh"; do
+		if [ -f "$menu" ]; then
+			sed -i "s#/opt/vpn-ui/sr-ui-amd64#${INSTALL_BIN}#g; s#/opt/vpn-ui/vpn-ui-amd64#${INSTALL_BIN}#g" "$menu"
+		fi
+	done
+	info "source branded as SR-UI; the menu resolves the panel at ${INSTALL_BIN}"
+}
+
+reset_source() {
+	git -C "$WORKDIR/src" reset --hard HEAD >/dev/null 2>&1 || return 1
+	git -C "$WORKDIR/src" clean -fdq >/dev/null 2>&1 || return 1
+	return 0
+}
+
 killed_by_oom() {
 	dmesg 2>/dev/null | tail -n 80 | grep -qiE 'out of memory|oom-kill|killed process'
+}
+
+try_build() {
+	(
+		cd "$WORKDIR/src"
+		export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
+		go build -trimpath -ldflags "-s -w" -o "$OUT" .
+	)
 }
 
 build_source() {
@@ -393,15 +454,27 @@ build_source() {
 	fi
 	mkdir -p "$(dirname "$OUT")"
 	step "building; on a small server this takes several minutes"
-	if ! (
-		cd "$WORKDIR/src"
-		export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
-		go build -trimpath -ldflags "-s -w" -o "$OUT" .
-	); then
+	if ! try_build; then
 		if killed_by_oom; then
 			die "the kernel killed the build for running out of memory; re-run with --swap (or build on a machine with more RAM)"
 		fi
-		die "go build failed; the output above says why"
+		# A rebrand bug must not cost the user a panel: undo it and build the
+		# pristine tree once, then say plainly what they ended up with.
+		if [ "$BRANDED" != "1" ]; then
+			die "go build failed; the output above says why"
+		fi
+		warn "the build failed with the rebrand applied; undoing it and trying once more"
+		if ! reset_source; then
+			die "go build failed and the source could not be restored; the output above says why"
+		fi
+		BRANDED=0
+		if ! try_build; then
+			if killed_by_oom; then
+				die "the kernel killed the build for running out of memory; re-run with --swap"
+			fi
+			die "go build failed; the output above says why"
+		fi
+		warn "this binary is NOT rebranded, so it installs a vpn-ui menu; please report the rebrand failure"
 	fi
 	if [ ! -s "$OUT" ]; then
 		die "the build reported success but produced no binary"
@@ -419,6 +492,7 @@ main() {
 	ensure_go
 	ensure_memory
 	clone_source
+	brand_source
 	build_source
 	if [ "$KEEP_SRC" = "1" ]; then
 		info "source kept at $WORKDIR/src"
