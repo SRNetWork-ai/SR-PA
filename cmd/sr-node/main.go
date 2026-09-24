@@ -1,20 +1,18 @@
 // Command sr-node is the agent half of SR-UI's node fleet.
 //
 // It runs on a serving machine, enrolls once against the panel with a
-// single-use join token, then reports in every 30 seconds and pulls its
-// assignment whenever the panel answers with a config hash it is not already
-// running.
+// single-use join token, then reports in every 30 seconds, pulls its config
+// whenever the panel answers with a hash it is not already running, and runs
+// that config on an Xray it supervises itself.
 //
-// What it deliberately does NOT do yet is turn that assignment into a running
-// Xray config; that is the next piece of work. Until it exists the agent
-// refuses to claim a config is applied: it stores the bundle, reports the
-// reason it is out of sync, and runs an apply hook if the operator supplies
-// one. A fleet page that says "in sync" while nothing is serving traffic is
-// worse than one that admits it does not know.
+// It claims nothing it has not done. A config the core refuses, a core that
+// dies a second after starting, a node with no core installed at all: each of
+// those is reported to the panel as the reason this node is out of sync, and
+// the applied hash stays where it was. A fleet page that says "in sync" while
+// nothing is serving traffic is worse than one that admits it does not know.
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -38,7 +36,7 @@ import (
 )
 
 const (
-	agentVersion   = "0.1.0"
+	agentVersion   = "0.2.0"
 	defaultTick    = 30 * time.Second
 	minTick        = 5 * time.Second
 	httpTimeout    = 20 * time.Second
@@ -104,14 +102,17 @@ type heartbeatResponse struct {
 	ServerTime int64  `json:"serverTime"`
 }
 
-// bundle mirrors only the fields the agent acts on. The file it writes keeps the
-// panel's full response, so a future apply step reads the whole assignment even
-// though this version understands part of it.
+// bundle is the node's work as the panel describes it. Config is the finished
+// Xray config the master rendered; Notes are the things it could not put in
+// there and the operator needs to hear about, such as an inbound that is
+// assigned to this node but disabled in the panel.
 type bundle struct {
-	NodeId int    `json:"nodeId"`
-	Node   string `json:"node"`
-	Role   string `json:"role"`
-	Hash   string `json:"hash"`
+	NodeId int             `json:"nodeId"`
+	Node   string          `json:"node"`
+	Role   string          `json:"role"`
+	Config json.RawMessage `json:"config"`
+	Notes  []string        `json:"notes"`
+	Hash   string          `json:"hash"`
 }
 
 type agent struct {
@@ -130,8 +131,8 @@ func main() {
 	flag.StringVar(&opts.url, "url", "", "panel base url, including the panel's secret path")
 	flag.StringVar(&opts.token, "token", "", "single-use join token minted in the panel; enrolls or re-enrolls this node")
 	flag.StringVar(&opts.dir, "dir", "/etc/sr-node", "state directory")
-	flag.StringVar(&opts.hook, "apply", "", "program run after a new config is stored (default: apply.sh in the state directory when present)")
-	flag.StringVar(&opts.corePath, "core", "", "path to the xray binary, used only to report its version")
+	flag.StringVar(&opts.hook, "apply", "", "program run after a config is applied (default: apply.sh in the state directory when present)")
+	flag.StringVar(&opts.corePath, "core", "", "path to the xray binary; found automatically when it sits in a usual place")
 	flag.IntVar(&opts.interval, "interval", 0, "seconds between heartbeats; overrides what the panel asked for")
 	flag.BoolVar(&opts.insecure, "insecure", false, "accept the panel's certificate without verifying it (self-signed panels)")
 	flag.BoolVar(&opts.once, "once", false, "run a single cycle and exit; used by the installer to prove the channel works")
@@ -161,6 +162,7 @@ func run(opts options) error {
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: opts.insecure},
 		},
 	}
+	xrayCore.Configure(opts.dir, opts.corePath)
 
 	if err := a.loadState(); err != nil {
 		return err
@@ -201,6 +203,10 @@ func run(opts options) error {
 	log.Printf("sr-node %s reporting as node %d (%s) every %s", agentVersion, a.st.NodeId, a.st.NodeName, a.tick)
 	a.cycle()
 	if opts.once {
+		// The installer runs one cycle to prove the channel works, then the
+		// service takes over. Leaving a core behind from that trial run would
+		// hold the ports the real one needs a second later.
+		xrayCore.Stop()
 		return nil
 	}
 
@@ -210,6 +216,7 @@ func run(opts options) error {
 		select {
 		case <-ctx.Done():
 			log.Print("sr-node: stopping")
+			xrayCore.Stop()
 			return nil
 		case <-ticker.C:
 			a.cycle()
@@ -223,6 +230,13 @@ func run(opts options) error {
 // a minute or a config that fails to apply are all things the next tick should
 // retry; exiting would turn a transient failure into an operator's afternoon.
 func (a *agent) cycle() {
+	// Checked before reporting, so a core that died since the last beat is news
+	// the panel gets in this one rather than thirty seconds later.
+	if err := xrayCore.Ensure(); err != nil {
+		a.lastErr = err.Error()
+		log.Printf("sr-node: %v", err)
+	}
+
 	start := time.Now()
 	var resp heartbeatResponse
 	if err := a.call(http.MethodPost, "node/heartbeat", a.collect(), &resp, true); err != nil {
@@ -232,7 +246,7 @@ func (a *agent) cycle() {
 	a.latency = time.Since(start).Milliseconds()
 
 	if resp.ConfigHash == "" || resp.ConfigHash == a.st.AppliedHash {
-		if resp.ConfigHash != "" {
+		if resp.ConfigHash != "" && xrayCore.Running() {
 			a.lastErr = ""
 		}
 		return
@@ -250,7 +264,7 @@ func (a *agent) collect() heartbeatRequest {
 	up, down := netTotals()
 	return heartbeatRequest{
 		AgentVersion: agentVersion,
-		CoreVersion:  a.coreVersion(),
+		CoreVersion:  xrayCore.Version(),
 		AppliedHash:  a.st.AppliedHash,
 		Uptime:       hostUptime(),
 		// Rounded to whole numbers: one decimal place of CPU is noise on a fleet
@@ -294,7 +308,10 @@ func (a *agent) enroll(token string) error {
 	return nil
 }
 
-// sync stores the assignment and applies it if an apply hook exists.
+// sync fetches the config the panel built for this node and runs it.
+//
+// The applied hash is written last and only after the core is up on it, so a
+// failure anywhere leaves the node reporting the config it is really serving.
 func (a *agent) sync(hash string) error {
 	raw, err := a.request(http.MethodGet, "node/config", nil, true)
 	if err != nil {
@@ -308,19 +325,35 @@ func (a *agent) sync(hash string) error {
 		return errors.New("the panel returned a config with no hash")
 	}
 
+	// The whole answer is kept on disk, not just the part this version reads: it
+	// is the first thing to look at when a node is not doing what the panel says
+	// it should be.
 	path := filepath.Join(a.opts.dir, bundleFileName)
 	if err := writeAtomic(path, raw, 0o600); err != nil {
 		return fmt.Errorf("storing config %s: %w", short(b.Hash), err)
 	}
-
-	hook := a.hookPath()
-	if hook == "" {
-		// Not an error in the sense of something broken, but the node is genuinely
-		// not serving this config, and the panel must not be told otherwise.
-		return fmt.Errorf("config %s stored at %s, but no apply hook is configured, so this node is not serving it", short(b.Hash), path)
+	for _, note := range b.Notes {
+		log.Printf("sr-node: panel note: %s", firstLine(note))
 	}
-	if err := a.runHook(hook, path, &b); err != nil {
-		return err
+
+	applied := false
+	if len(b.Config) > 0 {
+		if err := xrayCore.Apply(b.Config, a.st.PanelURL); err != nil {
+			return fmt.Errorf("config %s: %w", short(b.Hash), err)
+		}
+		applied = true
+	}
+	// The hook survives as an extra step rather than the only one: firewall
+	// rules, a second daemon, an operator's own idea of what a node should do
+	// when its work changes.
+	if hook := a.hookPath(); hook != "" {
+		if err := a.runHook(hook, path, &b); err != nil {
+			return err
+		}
+		applied = true
+	}
+	if !applied {
+		return fmt.Errorf("config %s stored at %s, but this node has no xray to run it and no apply hook, so it is serving nothing", short(b.Hash), path)
 	}
 
 	a.st.AppliedHash = b.Hash
@@ -357,6 +390,7 @@ func (a *agent) runHook(hook, bundlePath string, b *bundle) error {
 	cmd := exec.CommandContext(ctx, hook, bundlePath)
 	cmd.Env = append(os.Environ(),
 		"SR_NODE_BUNDLE="+bundlePath,
+		"SR_NODE_CONFIG="+xrayCore.ConfigPath(),
 		"SR_NODE_HASH="+b.Hash,
 		"SR_NODE_ID="+strconv.Itoa(b.NodeId),
 		"SR_NODE_NAME="+b.Node,
@@ -456,172 +490,6 @@ func (a *agent) saveState() error {
 	return writeAtomic(filepath.Join(a.opts.dir, stateFileName), data, 0o600)
 }
 
-// coreVersion is best effort and stays empty when no core path was given: an
-// unknown version is better than a wrong one on the fleet page.
-func (a *agent) coreVersion() string {
-	path := strings.TrimSpace(a.opts.corePath)
-	if path == "" {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "-version").Output()
-	if err != nil {
-		return ""
-	}
-	line := firstLine(string(out))
-	if fields := strings.Fields(line); len(fields) >= 2 {
-		return fields[1]
-	}
-	return line
-}
-
-func (a *agent) cpuPct() float64 {
-	idle, total, err := cpuSample()
-	if err != nil {
-		return 0
-	}
-	defer func() {
-		a.cpuIdle, a.cpuTotal = idle, total
-	}()
-	if total <= a.cpuTotal {
-		return 0
-	}
-	deltaTotal := float64(total - a.cpuTotal)
-	deltaIdle := float64(idle - a.cpuIdle)
-	busy := (deltaTotal - deltaIdle) / deltaTotal * 100
-	return clampPct(busy)
-}
-
-func cpuSample() (uint64, uint64, error) {
-	f, err := os.Open("/proc/stat")
-	if err != nil {
-		return 0, 0, err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "cpu ") {
-			continue
-		}
-		var idle, total uint64
-		for i, raw := range strings.Fields(line)[1:] {
-			v, convErr := strconv.ParseUint(raw, 10, 64)
-			if convErr != nil {
-				continue
-			}
-			total += v
-			// idle and iowait: a box waiting on disk is not a box doing work.
-			if i == 3 || i == 4 {
-				idle += v
-			}
-		}
-		return idle, total, nil
-	}
-	return 0, 0, errors.New("no cpu line in /proc/stat")
-}
-
-func memPct() float64 {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-
-	var total, available float64
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
-			continue
-		}
-		value, convErr := strconv.ParseFloat(fields[1], 64)
-		if convErr != nil {
-			continue
-		}
-		switch fields[0] {
-		case "MemTotal:":
-			total = value
-		case "MemAvailable:":
-			available = value
-		}
-	}
-	if total <= 0 {
-		return 0
-	}
-	// MemAvailable, not MemFree: cache is memory the kernel will hand back on
-	// demand, and counting it as used makes every healthy Linux box look full.
-	return clampPct((total - available) / total * 100)
-}
-
-func diskPct(path string) float64 {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0
-	}
-	total := float64(st.Blocks) * float64(st.Bsize)
-	free := float64(st.Bavail) * float64(st.Bsize)
-	if total <= 0 {
-		return 0
-	}
-	// Bavail, not Bfree: the blocks reserved for root are not space this node can
-	// use for logs or a core download.
-	return clampPct((total - free) / total * 100)
-}
-
-// netTotals sums the machine's real interfaces. Loopback and container bridges
-// are skipped: counting them would report traffic that never left the box.
-func netTotals() (int64, int64) {
-	f, err := os.Open("/proc/net/dev")
-	if err != nil {
-		return 0, 0
-	}
-	defer f.Close()
-
-	var up, down int64
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		colon := strings.Index(line, ":")
-		if colon < 0 {
-			continue
-		}
-		name := strings.TrimSpace(line[:colon])
-		if name == "lo" || strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "br-") {
-			continue
-		}
-		fields := strings.Fields(line[colon+1:])
-		if len(fields) < 9 {
-			continue
-		}
-		if rx, convErr := strconv.ParseInt(fields[0], 10, 64); convErr == nil {
-			down += rx
-		}
-		if tx, convErr := strconv.ParseInt(fields[8], 10, 64); convErr == nil {
-			up += tx
-		}
-	}
-	return up, down
-}
-
-func hostUptime() int64 {
-	data, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) == 0 {
-		return 0
-	}
-	seconds, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return 0
-	}
-	return int64(seconds)
-}
-
 // joinURL appends an agent route to whatever base the operator was given,
 // including the panel's secret path.
 func joinURL(base, route string) (string, error) {
@@ -653,16 +521,6 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-func clampPct(v float64) float64 {
-	if math.IsNaN(v) || v < 0 {
-		return 0
-	}
-	if v > 100 {
-		return 100
-	}
-	return v
-}
-
 func short(hash string) string {
 	if len(hash) > 12 {
 		return hash[:12]
@@ -674,7 +532,7 @@ func short(hash string) string {
 // error page from a reverse proxy is otherwise pasted whole into the journal.
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
-	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+	if idx := strings.IndexByte(s, 10); idx >= 0 {
 		s = strings.TrimSpace(s[:idx])
 	}
 	if len(s) > 200 {
