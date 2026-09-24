@@ -257,6 +257,7 @@ func (a *NodeAgentController) initRouter(g *gin.RouterGroup) {
 	authed.Use(a.authenticate)
 	authed.POST("/heartbeat", a.heartbeat)
 	authed.GET("/config", a.config)
+	authed.POST("/traffic", a.traffic)
 }
 
 // authenticate resolves the bearer token to a node.
@@ -344,6 +345,31 @@ func (a *NodeAgentController) config(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, bundle)
+}
+
+// traffic takes a node's own measurement of what it served and bills it.
+//
+// A node is the only thing that can measure its own connections, so this is
+// the one place an account's usage on a node enters the panel at all. The
+// count of accepted records goes back in the answer because the agent uses it
+// for nothing and an operator reading a request log uses it for everything: a
+// node reporting zero accounts while its interface counters climb is a node
+// whose core is serving someone the panel does not know about.
+func (a *NodeAgentController) traffic(c *gin.Context) {
+	nodeId := c.GetInt("node_id")
+	var report service.NodeTrafficReport
+	// Deliberately not fatal. A body this cannot read becomes an empty report
+	// and a zero answer, which the agent retries with everything it has; a 400
+	// here would cost the node its accounting for good, because the agent moves
+	// its baselines on any answer it can parse.
+	_ = c.ShouldBind(&report)
+
+	accepted, err := a.nodeService.IngestTraffic(nodeId, report)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "msg": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "accepted": accepted})
 }
 
 // nodeBearerToken reads the token from whichever place a daemon, a curl command
