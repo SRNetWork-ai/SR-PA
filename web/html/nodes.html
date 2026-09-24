@@ -1,0 +1,489 @@
+{{ template "page/head_start" .}}
+{{ template "page/head_end" .}}
+
+{{ template "page/body_start" .}}
+{{template "page/shell_start" . }}
+      <a-spin :spinning="spinning" :delay="300" tip='{{ i18n "loading"}}' size="large">
+        <transition name="list" appear>
+          <a-row :gutter="[16, 16]" :style="{ margin: 0 }">
+            <a-col :span="24">
+              <a-card hoverable :style="{ marginBottom: '16px' }">
+                <div :style="{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }">
+                  <a-button type="primary" icon="plus" @click="openAdd()">Add node</a-button>
+                  <a-button icon="reload" @click="loadNodes(true)"></a-button>
+                  <a-tag color="blue">[[ nodes.length ]] total</a-tag>
+                  <a-tag :color="nodes.length && onlineCount === nodes.length ? 'green' : 'orange'">[[ onlineCount ]] online</a-tag>
+                  <a-tag :color="nodes.length && syncCount === nodes.length ? 'green' : 'orange'">[[ syncCount ]] in sync</a-tag>
+                </div>
+              </a-card>
+
+              <a-card hoverable :bodyStyle="{ padding: 0 }">
+                <a-table :columns="columns" :row-key="r => r.id" :data-source="nodes"
+                  :scroll="isMobile ? {} : { x: 1000 }" :pagination="false" bordered
+                  :locale='{ emptyText: `{{ i18n "noData" }}` }'>
+
+                  <template slot="name" slot-scope="text, node">
+                    <div>
+                      <b>[[ node.name ]]</b>
+                      <a-tag :color="node.role === 'relay' ? 'purple' : 'blue'" :style="{ marginLeft: '6px' }">
+                        [[ node.role || 'edge' ]]
+                      </a-tag>
+                    </div>
+                    <div v-if="node.relayViaId" :style="{ fontSize: '11px', color: '#8c8c8c' }">
+                      via [[ nodeName(node.relayViaId) ]]<span v-if="node.relayKind"> ([[ node.relayKind ]])</span>
+                    </div>
+                    <div v-if="node.tags" :style="{ fontSize: '11px', color: '#8c8c8c' }">[[ node.tags ]]</div>
+                  </template>
+
+                  <template slot="address" slot-scope="text, node">
+                    <div>[[ node.address ]]:[[ node.port ]]</div>
+                    <div v-if="node.publicHost" :style="{ fontSize: '11px', color: '#8c8c8c' }">
+                      clients: [[ node.publicHost ]]
+                    </div>
+                  </template>
+
+                  <template slot="place" slot-scope="text, node">
+                    <div>[[ node.countryCode || '-' ]]<span v-if="node.city"> / [[ node.city ]]</span></div>
+                    <div v-if="node.provider" :style="{ fontSize: '11px', color: '#8c8c8c' }">[[ node.provider ]]</div>
+                  </template>
+
+                  <template slot="status" slot-scope="text, node">
+                    <a-tag :color="statusColor(node)">[[ statusText(node) ]]</a-tag>
+                    <div :style="{ fontSize: '11px', color: '#8c8c8c' }">[[ seenText(node) ]]</div>
+                  </template>
+
+                  <template slot="sync" slot-scope="text, node">
+                    <a-tag :color="isSynced(node) ? 'green' : 'orange'">[[ isSynced(node) ? 'in sync' : 'pending' ]]</a-tag>
+                    <a-tooltip v-if="node.lastError" :title="node.lastError">
+                      <a-icon type="warning" :style="{ color: 'var(--error)', marginLeft: '4px' }"></a-icon>
+                    </a-tooltip>
+                  </template>
+
+                  <template slot="inbounds" slot-scope="text, node">
+                    <a-button size="small" @click="openAssign(node)">[[ inboundCount(node) ]]</a-button>
+                  </template>
+
+                  <template slot="load" slot-scope="text, node">
+                    <div :style="{ fontSize: '12px' }">
+                      cpu [[ pct(node.cpuPct) ]] / ram [[ pct(node.memPct) ]] / disk [[ pct(node.diskPct) ]]
+                    </div>
+                    <div :style="{ fontSize: '11px', color: '#8c8c8c' }">agent [[ node.agentVersion || '-' ]]</div>
+                  </template>
+
+                  <template slot="action" slot-scope="text, node">
+                    <a-dropdown :trigger="['click']">
+                      <a-icon @click="e => e.preventDefault()" type="more"
+                        :style="{ fontSize: '16px', textDecoration: 'bold' }"></a-icon>
+                      <a-menu slot="overlay" :theme="themeSwitcher.currentTheme">
+                        <a-menu-item @click="openEdit(node)">
+                          <a-icon type="edit"></a-icon>
+                          <span>{{ i18n "edit" }}</span>
+                        </a-menu-item>
+                        <a-menu-item @click="openAssign(node)">
+                          <a-icon type="api"></a-icon>
+                          <span>Inbounds</span>
+                        </a-menu-item>
+                        <a-menu-item @click="mintToken(node)">
+                          <a-icon type="key"></a-icon>
+                          <span>Join token</span>
+                        </a-menu-item>
+                        <a-menu-item @click="toggleEnable(node)">
+                          <a-icon :type="node.enable ? 'stop' : 'play-circle'"></a-icon>
+                          <span>[[ node.enable ? 'Disable' : 'Enable' ]]</span>
+                        </a-menu-item>
+                        <a-menu-item @click="delNode(node)">
+                          <span :style="{ color: 'var(--error)' }">
+                            <a-icon type="delete"></a-icon>
+                            <span>{{ i18n "delete" }}</span>
+                          </span>
+                        </a-menu-item>
+                      </a-menu>
+                    </a-dropdown>
+                  </template>
+                </a-table>
+              </a-card>
+            </a-col>
+          </a-row>
+        </transition>
+      </a-spin>
+
+      <a-modal v-model="edit.visible" :class="themeSwitcher.currentTheme"
+        :title="edit.isEdit ? 'Edit node' : 'Add node'" :confirm-loading="edit.loading"
+        ok-text='{{ i18n "confirm" }}' cancel-text='{{ i18n "cancel" }}' @ok="saveNode">
+        <a-form layout="vertical">
+          <a-form-item label="Name">
+            <a-input v-model.trim="edit.model.name" placeholder="de-edge-1"></a-input>
+          </a-form-item>
+          <a-row :gutter="8">
+            <a-col :span="16">
+              <a-form-item label="Agent address">
+                <a-input v-model.trim="edit.model.address" placeholder="node address or domain"></a-input>
+              </a-form-item>
+            </a-col>
+            <a-col :span="8">
+              <a-form-item label="Agent port">
+                <a-input-number v-model="edit.model.port" :min="1" :max="65535" :style="{ width: '100%' }"></a-input-number>
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-row :gutter="8">
+            <a-col :span="12">
+              <a-form-item label="Role">
+                <a-select v-model="edit.model.role">
+                  <a-select-option value="edge">edge - traffic leaves here</a-select-option>
+                  <a-select-option value="relay">relay - forward to another node</a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+            <a-col :span="12" v-if="edit.model.role === 'relay'">
+              <a-form-item label="Relay via">
+                <a-select v-model="edit.model.relayViaId">
+                  <a-select-option :value="0">- pick a node -</a-select-option>
+                  <a-select-option v-for="n in relayTargets" :key="n.id" :value="n.id">[[ n.name ]]</a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-row :gutter="8">
+            <a-col :span="8">
+              <a-form-item label="Country code">
+                <a-input v-model.trim="edit.model.countryCode" placeholder="DE"></a-input>
+              </a-form-item>
+            </a-col>
+            <a-col :span="8">
+              <a-form-item label="City">
+                <a-input v-model.trim="edit.model.city" placeholder="Frankfurt"></a-input>
+              </a-form-item>
+            </a-col>
+            <a-col :span="8">
+              <a-form-item label="Provider">
+                <a-input v-model.trim="edit.model.provider" placeholder="hetzner"></a-input>
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-form-item label="Public host for client links">
+            <a-input v-model.trim="edit.model.publicHost" placeholder="leave empty to use the node address"></a-input>
+          </a-form-item>
+          <a-form-item label="Tags">
+            <a-input v-model.trim="edit.model.tags" placeholder="comma separated, free form"></a-input>
+          </a-form-item>
+          <a-row :gutter="8">
+            <a-col :span="12">
+              <a-form-item label="Agent speaks TLS">
+                <a-switch v-model="edit.model.useTls"></a-switch>
+              </a-form-item>
+            </a-col>
+            <a-col :span="12">
+              <a-form-item label="Enabled">
+                <a-switch v-model="edit.model.enable"></a-switch>
+              </a-form-item>
+            </a-col>
+          </a-row>
+        </a-form>
+      </a-modal>
+
+      <a-modal v-model="assign.visible" :class="themeSwitcher.currentTheme"
+        :title="'Inbounds on ' + assign.nodeName" :confirm-loading="assign.loading"
+        ok-text='{{ i18n "confirm" }}' cancel-text='{{ i18n "cancel" }}' @ok="saveAssign">
+        <p :style="{ color: '#8c8c8c' }">
+          Checked inbounds are served by this node. The agent picks the change up on its next heartbeat.
+        </p>
+        <a-checkbox-group v-model="assign.selected" :style="{ width: '100%' }">
+          <div v-for="ib in inbounds" :key="ib.id" :style="{ padding: '2px 0' }">
+            <a-checkbox :value="ib.id">[[ inboundLabel(ib) ]]</a-checkbox>
+          </div>
+        </a-checkbox-group>
+        <p v-if="!inbounds.length" :style="{ color: '#8c8c8c' }">No inbounds to assign yet.</p>
+      </a-modal>
+
+      <a-modal v-model="token.visible" :class="themeSwitcher.currentTheme"
+        :title="'Join token for ' + token.nodeName" :footer="null" :width="680">
+        <a-alert type="warning" show-icon message="Shown once"
+          description="Single use, valid for 30 minutes. The panel keeps only its hash, so copy it now."></a-alert>
+        <div :style="{ marginTop: '12px' }">
+          <a-input read-only :value="token.value"></a-input>
+        </div>
+        <div :style="{ marginTop: '12px' }">
+          <a-textarea read-only :value="token.command" :rows="4"></a-textarea>
+        </div>
+        <p :style="{ marginTop: '8px', color: '#8c8c8c', fontSize: '12px' }">
+          Run it as root on the new server. Add --insecure if this panel serves a self signed certificate.
+        </p>
+        <div :style="{ display: 'flex', gap: '8px' }">
+          <a-button type="primary" icon="copy" @click="copy(token.command)">Copy install command</a-button>
+          <a-button icon="copy" @click="copy(token.value)">Copy token</a-button>
+        </div>
+      </a-modal>
+{{template "page/shell_end" . }}
+
+{{template "page/body_scripts" .}}
+{{template "component/aSidebar" .}}
+{{template "component/aThemeSwitch" .}}
+
+<script>
+  // Kept in step with nodeOnlineWindow in web/service/node.go. The page derives
+  // health itself instead of reading a flag off the row: a stale panel build, a
+  // cached response or a row written by an older version would all report a node
+  // as healthy long after it stopped calling in.
+  const NODE_ONLINE_WINDOW = 95;
+  const NODE_DEFAULT_PORT = 62789;
+
+  const columns = [
+    { title: 'Node', align: 'left', width: 150, scopedSlots: { customRender: 'name' } },
+    { title: 'Agent', align: 'center', width: 130, scopedSlots: { customRender: 'address' } },
+    { title: 'Location', align: 'center', width: 110, scopedSlots: { customRender: 'place' } },
+    { title: '{{ i18n "status" }}', align: 'center', width: 100, scopedSlots: { customRender: 'status' } },
+    { title: 'Config', align: 'center', width: 100, scopedSlots: { customRender: 'sync' } },
+    { title: 'Inbounds', align: 'center', width: 70, scopedSlots: { customRender: 'inbounds' } },
+    { title: 'Load', align: 'center', width: 140, scopedSlots: { customRender: 'load' } },
+    { title: '', align: 'center', width: 30, scopedSlots: { customRender: 'action' } },
+  ];
+
+  const emptyNode = () => ({
+    id: 0, name: '', address: '', port: NODE_DEFAULT_PORT, useTls: false, fingerprint: '',
+    role: 'edge', enable: true, countryCode: '', city: '', provider: '', tags: '',
+    relayViaId: 0, relayKind: '', publicHost: '',
+  });
+
+  const app = new Vue({
+    delimiters: ['[[', ']]'],
+    mixins: [MediaQueryMixin],
+    el: '#app',
+    data: {
+      themeSwitcher,
+      pageTitle: 'Nodes',
+      pageClass: '',
+      spinning: false,
+      nodes: [],
+      inbounds: [],
+      now: Math.floor(Date.now() / 1000),
+      edit: { visible: false, loading: false, isEdit: false, model: emptyNode() },
+      assign: { visible: false, loading: false, nodeId: 0, nodeName: '', selected: [] },
+      token: { visible: false, value: '', command: '', nodeName: '' },
+      columns,
+    },
+    computed: {
+      onlineCount() { return this.nodes.filter(n => this.isOnline(n)).length; },
+      syncCount() { return this.nodes.filter(n => this.isSynced(n)).length; },
+      // A node may not relay through itself, and the service refuses longer loops
+      // as well; this only keeps the obvious one out of the picker.
+      relayTargets() { return this.nodes.filter(n => n.id !== this.edit.model.id); },
+    },
+    methods: {
+      async loadNodes(showSpin) {
+        if (showSpin) this.spinning = true;
+        const msg = await HttpUtil.get('/panel/api/nodes/list');
+        this.spinning = false;
+        if (!msg || !msg.success) return;
+        this.nodes = msg.obj || [];
+        this.now = Math.floor(Date.now() / 1000);
+      },
+      // The inbound list has moved between routes across versions of this panel,
+      // so the page asks in the order most likely to answer and stops at the first
+      // one that does, rather than breaking the whole modal on a 404.
+      async loadInbounds() {
+        const attempts = [
+          () => HttpUtil.post('/panel/api/inbounds/list'),
+          () => HttpUtil.get('/panel/api/inbounds/list'),
+          () => HttpUtil.post('/panel/inbound/list'),
+        ];
+        for (const attempt of attempts) {
+          try {
+            const msg = await attempt();
+            if (msg && msg.success && Array.isArray(msg.obj)) {
+              this.inbounds = msg.obj;
+              return;
+            }
+          } catch (e) { /* try the next shape */ }
+        }
+      },
+      openAdd() {
+        this.edit.model = emptyNode();
+        this.edit.isEdit = false;
+        this.edit.visible = true;
+      },
+      openEdit(node) {
+        const m = emptyNode();
+        Object.keys(m).forEach(k => { if (node[k] !== undefined && node[k] !== null) m[k] = node[k]; });
+        this.edit.model = m;
+        this.edit.isEdit = true;
+        this.edit.visible = true;
+      },
+      async saveNode() {
+        const m = this.edit.model;
+        if (!m.name || !m.address) {
+          this.notify('A node needs a name and an address', false);
+          return;
+        }
+        const relay = m.role === 'relay';
+        const payload = {
+          id: m.id || 0,
+          name: m.name,
+          address: m.address,
+          port: Number(m.port) || NODE_DEFAULT_PORT,
+          useTls: !!m.useTls,
+          fingerprint: m.fingerprint || '',
+          role: m.role || 'edge',
+          enable: !!m.enable,
+          countryCode: m.countryCode || '',
+          city: m.city || '',
+          provider: m.provider || '',
+          tags: m.tags || '',
+          relayViaId: relay ? (Number(m.relayViaId) || 0) : 0,
+          relayKind: relay ? (m.relayKind || '') : '',
+          publicHost: m.publicHost || '',
+        };
+        this.edit.loading = true;
+        const msg = await HttpUtil.post('/panel/api/nodes/save', payload);
+        this.edit.loading = false;
+        if (msg && msg.success) {
+          this.edit.visible = false;
+          await this.loadNodes();
+        }
+      },
+      async openAssign(node) {
+        this.assign.nodeId = node.id;
+        this.assign.nodeName = node.name;
+        this.assign.selected = [];
+        this.assign.visible = true;
+        if (!this.inbounds.length) await this.loadInbounds();
+        const msg = await HttpUtil.get('/panel/api/nodes/inbounds/' + node.id);
+        if (msg && msg.success) this.assign.selected = (msg.obj || []).map(l => l.inboundId);
+      },
+      async saveAssign() {
+        this.assign.loading = true;
+        const msg = await HttpUtil.post('/panel/api/nodes/inbounds/' + this.assign.nodeId, {
+          inboundIds: this.assign.selected,
+        });
+        this.assign.loading = false;
+        if (msg && msg.success) {
+          this.assign.visible = false;
+          await this.loadNodes();
+        }
+      },
+      async mintToken(node) {
+        const msg = await HttpUtil.post('/panel/api/nodes/token/' + node.id);
+        if (!msg || !msg.success) return;
+        const obj = msg.obj || {};
+        let proto = 'http';
+        if (obj.tls === true || location.protocol === 'https:') proto = 'https';
+        let base = obj.basePath || '/';
+        if (base.charAt(base.length - 1) !== '/') base += '/';
+        const url = proto + '://' + (obj.host || location.host) + base;
+        this.token.nodeName = node.name;
+        this.token.value = obj.token || '';
+        this.token.command = 'bash <(curl -fsSL raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-node-install.sh)'
+          + ' --url ' + url + ' --token ' + this.token.value;
+        this.token.visible = true;
+      },
+      toggleEnable(node) {
+        const next = !node.enable;
+        this.$confirm({
+          title: (next ? 'Enable ' : 'Disable ') + node.name,
+          content: next
+            ? 'The node starts serving its inbounds again on the next heartbeat.'
+            : 'The node keeps running but stops receiving config, and its inbounds are dropped from new links.',
+          class: themeSwitcher.currentTheme,
+          okText: '{{ i18n "confirm" }}',
+          cancelText: '{{ i18n "cancel" }}',
+          onOk: async () => {
+            const msg = await HttpUtil.post('/panel/api/nodes/enable/' + node.id, { enable: next });
+            if (msg && msg.success) await this.loadNodes();
+          },
+        });
+      },
+      delNode(node) {
+        this.$confirm({
+          title: 'Delete ' + node.name,
+          content: 'The panel forgets the node, its token and its inbound assignments. The agent on that machine keeps running until you uninstall it.',
+          class: themeSwitcher.currentTheme,
+          okText: '{{ i18n "delete" }}',
+          cancelText: '{{ i18n "cancel" }}',
+          onOk: async () => {
+            const msg = await HttpUtil.post('/panel/api/nodes/del/' + node.id);
+            if (msg && msg.success) await this.loadNodes();
+          },
+        });
+      },
+      isOnline(node) {
+        if (node.online !== undefined) return !!node.online;
+        return !!node.enable && node.lastSeen > 0 && (this.now - node.lastSeen) < NODE_ONLINE_WINDOW;
+      },
+      isSynced(node) {
+        if (node.inSync !== undefined) return !!node.inSync;
+        return !!node.configHash && node.configHash === node.appliedHash;
+      },
+      statusColor(node) {
+        if (!node.enable) return '';
+        if (this.isOnline(node)) return 'green';
+        return node.lastSeen ? 'red' : 'orange';
+      },
+      statusText(node) {
+        if (!node.enable) return 'disabled';
+        if (this.isOnline(node)) return 'online';
+        return node.lastSeen ? 'offline' : 'never seen';
+      },
+      seenText(node) {
+        if (!node.lastSeen) return 'not enrolled';
+        const d = Math.max(0, this.now - node.lastSeen);
+        if (d < 60) return d + 's ago';
+        if (d < 3600) return Math.floor(d / 60) + 'm ago';
+        if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+        return Math.floor(d / 86400) + 'd ago';
+      },
+      pct(v) { return Math.round(Number(v) || 0) + '%'; },
+      nodeName(id) {
+        const n = this.nodes.find(x => x.id === id);
+        return n ? n.name : ('#' + id);
+      },
+      inboundCount(node) {
+        const list = node.inbounds;
+        return Array.isArray(list) ? String(list.length) : 'set';
+      },
+      inboundLabel(ib) {
+        const name = ib.remark || ('inbound ' + ib.id);
+        return name + '  ' + (ib.protocol || '') + ' :' + (ib.port || '');
+      },
+      notify(text, ok) {
+        if (!this.$message) return;
+        if (ok === false) this.$message.error(text); else this.$message.success(text);
+      },
+      copy(text) {
+        if (!text) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text)
+            .then(() => this.notify('Copied'))
+            .catch(() => this.legacyCopy(text));
+          return;
+        }
+        this.legacyCopy(text);
+      },
+      legacyCopy(text) {
+        const el = document.createElement('textarea');
+        el.value = text;
+        el.setAttribute('readonly', '');
+        el.style.position = 'fixed';
+        el.style.opacity = '0';
+        document.body.appendChild(el);
+        el.select();
+        try { document.execCommand('copy'); this.notify('Copied'); }
+        catch (e) { this.notify('Copy failed, select the text by hand', false); }
+        document.body.removeChild(el);
+      },
+    },
+    async mounted() {
+      await this.loadNodes(true);
+      this.loadInbounds();
+      // Health is a clock reading as much as a stored value: the tick keeps the
+      // relative times honest between polls, and a node that stops calling in
+      // turns red on its own.
+      this.ticker = setInterval(() => { this.now = Math.floor(Date.now() / 1000); }, 5000);
+      this.poller = setInterval(() => { if (!this.edit.visible && !this.assign.visible) this.loadNodes(); }, 20000);
+    },
+    beforeDestroy() {
+      clearInterval(this.ticker);
+      clearInterval(this.poller);
+    },
+  });
+</script>
+{{ template "page/body_end" .}}
