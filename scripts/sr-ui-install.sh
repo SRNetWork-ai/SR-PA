@@ -8,8 +8,7 @@
 #   bash sr-ui-install.sh --uninstall  remove the service, keep the database
 #
 # Design rule: detect, do not assume. The distro, the CPU, a free port, an existing
-# panel and the binary's own CLI surface are all discovered at run time. Anything that
-# cannot be verified is reported rather than guessed.
+# panel and the binary's own CLI surface are all discovered at run time.
 
 set -euo pipefail
 
@@ -238,9 +237,8 @@ api_curl() {
 	fi
 }
 
-# Saves the body and prints the HTTP status. -f is deliberately absent here: the
-# status is the answer, and "missing" and "refused" are different problems with
-# different fixes. Guessing between them is how the old message lied.
+# Saves the body and prints the HTTP status. -f is deliberately absent: the status
+# is the answer, and "missing" and "refused" are different problems to report.
 api_status() {
 	local out="$1" url="$2" code=""
 	if [ -n "$TOKEN" ]; then
@@ -260,9 +258,7 @@ fetch_release() {
 	RELEASE_CODE="$(api_status "$RELEASE_FILE" "$url")"
 }
 
-# Every download URL in the release payload, one per line. Field 4 of a quote
-# separated "browser_download_url":"..." pair is the URL itself, with or without
-# a space after the colon - no regex escaping needed, which is the point.
+# Every download URL in the release payload, one per line.
 release_urls() {
 	grep -o '"browser_download_url"[^"]*"[^"]*"' | cut -d'"' -f4
 }
@@ -298,20 +294,31 @@ verify_checksum() {
 	info "checksum verified"
 }
 
-# A source build needs a Go toolchain, disk space and enough RAM to link a large
-# binary, so it lives in its own script that can install and check all three. Use
-# the copy next to this file when there is one; otherwise fetch it.
-build_from_source() {
-	local helper="" here="" args=""
+# These scripts call each other: use the copy next to this one in a checkout,
+# otherwise fetch it. Prints the path to use.
+helper_script() {
+	local name="$1" here="" path=""
 	here="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd || true)"
-	if [ -n "$here" ] && [ -f "$here/sr-ui-build.sh" ]; then
-		helper="$here/sr-ui-build.sh"
-	else
-		helper="$WORKDIR/sr-ui-build.sh"
-		step "fetching the source builder"
-		if ! curl -fsSL --max-time 60 -o "$helper" "$RAW/scripts/sr-ui-build.sh"; then
-			die "could not fetch scripts/sr-ui-build.sh from ${OWNER}/${REPO}"
+	if [ -n "$here" ] && [ -f "$here/$name" ]; then
+		printf '%s' "$here/$name"
+		return 0
+	fi
+	path="$WORKDIR/$name"
+	if [ ! -s "$path" ]; then
+		if ! curl -fsSL --max-time 60 -o "$path" "$RAW/scripts/$name"; then
+			return 1
 		fi
+	fi
+	printf '%s' "$path"
+}
+
+# A source build needs a Go toolchain, disk space and enough RAM to link a large
+# binary, so it lives in its own script that can install and check all three.
+build_from_source() {
+	local helper="" args=""
+	step "fetching the source builder"
+	if ! helper="$(helper_script sr-ui-build.sh)"; then
+		die "could not fetch scripts/sr-ui-build.sh from ${OWNER}/${REPO}"
 	fi
 	FETCHED_BIN="$WORKDIR/${APP}"
 	args="--out $FETCHED_BIN --repo ${OWNER}/${REPO}"
@@ -330,6 +337,30 @@ build_from_source() {
 	# shellcheck disable=SC2086
 	if ! bash "$helper" $args >/dev/null; then
 		die "the source build failed; run it alone to see everything it says: bash $helper --out /tmp/${APP} --swap"
+	fi
+}
+
+# The panel forks bin/xray-<goos>-<goarch> from its working directory. A release
+# binary unpacks that core out of itself (corebundle); one built from source has
+# nothing to unpack, and then the panel runs while every inbound stays down and
+# the Reality key buttons, which shell out to the core, fail. The helper is
+# idempotent, so ask it either way rather than guess which kind this is.
+install_core() {
+	local helper="" args="--dir $DEST/bin"
+	step "checking the Xray core"
+	if ! helper="$(helper_script sr-ui-core.sh)"; then
+		warn "could not fetch scripts/sr-ui-core.sh; inbounds stay down until a core is in $DEST/bin"
+		return 0
+	fi
+	if [ "$DRY_RUN" = "1" ]; then
+		args="$args --dry-run"
+	fi
+	if [ -n "$TOKEN" ]; then
+		args="$args --token $TOKEN"
+	fi
+	# shellcheck disable=SC2086
+	if ! bash "$helper" $args >/dev/null; then
+		warn "no Xray core was installed; retry it alone: bash $helper --dir $DEST/bin"
 	fi
 }
 
@@ -417,9 +448,9 @@ obtain_binary() {
 	extract_binary "$asset"
 }
 
-# The panel's CLI differs between builds, so ask this binary what it supports rather
-# than hardcoding a subcommand that may not exist. A build that ignores unknown flags
-# would start serving instead of printing help, so this never runs unbounded.
+# The panel's CLI differs between builds, so ask this binary what it supports. A
+# build that ignores unknown flags would start serving instead of printing help,
+# so this never runs unbounded.
 bin_help() {
 	if [ -n "$HELP_TIMEOUT" ]; then
 		# shellcheck disable=SC2086
@@ -463,10 +494,9 @@ WantedBy=multi-user.target
 EOF
 }
 
-# The menu that ships inside the binary resolves the panel through VPNUI_BIN and
-# otherwise falls back to the path upstream installs to. A binary built without
-# the rebrand therefore answers "panel binary not found" on a healthy install,
-# so pin the real path unless the menu already points at it.
+# The menu inside the binary resolves the panel through VPNUI_BIN and otherwise
+# falls back to the path upstream installs to, so a binary built without the
+# rebrand answers "panel binary not found" on a healthy install.
 pin_menu_bin() {
 	if [ "$DRY_RUN" = "1" ] || [ ! -f "$MENU" ]; then
 		return 0
@@ -557,10 +587,8 @@ health_check() {
 	return 1
 }
 
-# ifconfig.me answers over whichever family the server prefers, and a server that
-# prefers IPv6 produced an address no browser accepts: an IPv6 literal is only a
-# URL host inside brackets. Ask for IPv4 first, and bracket v6 when it is all
-# there is.
+# ifconfig.me answers over whichever family the server prefers, and an IPv6
+# literal is only a URL host inside brackets. Ask for IPv4 first, bracket v6.
 public_address() {
 	local ip=""
 	ip="$(curl -4 -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
@@ -595,7 +623,7 @@ do_uninstall() {
 		run rm -f "$BIN"
 		info "binary removed; $DEST kept"
 	fi
-	info "note: the database lives wherever this build puts it, which --purge does not touch unless it is under $DEST"
+	info "note: a database outside $DEST is untouched, even by --purge"
 }
 
 confirm_or_exit() {
@@ -658,6 +686,7 @@ main() {
 	fi
 	run cp -f "$FETCHED_BIN" "$BIN"
 	run chmod +x "$BIN"
+	install_core
 
 	local execline
 	if [ "$DRY_RUN" = "1" ]; then
