@@ -42,6 +42,13 @@ func (a *XUIController) initRouter(g *gin.RouterGroup) {
 	g.GET("/settings", requirePerm(model.PermPanelSettings), a.settings)
 	g.GET("/xray", requirePerm(model.PermXraySettings), a.xraySettings)
 	g.GET("/core", requirePerm(model.PermCoreSettings), a.coreSettings)
+	// Fleet health is an operations view, so opening the page takes the same claim
+	// as the rest of the server-wide settings. Everything the page can change is
+	// refused by /panel/api/nodes unless the caller is a super admin: a node is
+	// handed account credentials and can be pointed at any address on the
+	// internet, which is closer to handing over the panel than to editing an
+	// inbound.
+	g.GET("/nodes", requirePerm(model.PermPanelSettings), a.nodes)
 	g.GET("/admins", requireSuperAdmin(), a.admins)
 	// Resellers is a permission and not requireSuperAdmin(), so a delegated admin can
 	// run their own resellers. The escalation that opens (assigning someone else's
@@ -116,6 +123,12 @@ func (a *XUIController) xraySettings(c *gin.Context) {
 // coreSettings renders the Core Settings page (per-core status + provisioning).
 func (a *XUIController) coreSettings(c *gin.Context) {
 	html(c, "core.html", "pages.core.title", nil)
+}
+
+// nodes renders the Nodes page: the fleet, its relay chains and the join tokens
+// new machines enroll with.
+func (a *XUIController) nodes(c *gin.Context) {
+	html(c, "nodes.html", "pages.nodes.title", nil)
 }
 
 // admins renders the Admins management page (super admin only).

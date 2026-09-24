@@ -97,6 +97,13 @@
                         title: '{{ i18n "menu.core"}}'
                     },
                     {{ end }}
+                    {{ if .perms.accessPanelSettings }}
+                    {
+                        key: '{{ .base_path }}panel/nodes',
+                        icon: 'deployment-unit',
+                        title: '{{ i18n "menu.nodes"}}'
+                    },
+                    {{ end }}
                     {{ if .perms.superAdmin }}
                     {
                         key: '{{ .base_path }}panel/admins',

@@ -1,0 +1,10 @@
+# Strings added by SR-UI, kept out of the 80 KB per-language files so they can be
+# pushed and reviewed on their own. The loader walks this whole folder, so every
+# file whose name ends in .<locale>.toml merges into the same bundle.
+#
+# Keys are written quoted and dotted on purpose: a quoted TOML key is literal, so
+# the message id is exactly what the template asks for regardless of how the rest
+# of the locale file is organised.
+
+"menu.nodes" = "Nodes"
+"pages.nodes.title" = "Nodes"
