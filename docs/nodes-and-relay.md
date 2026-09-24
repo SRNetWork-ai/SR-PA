@@ -97,32 +97,44 @@ The descriptor is sorted before hashing, so the hash depends on the assignment
 and not on SQLite row order - otherwise an unchanged node would drift in and out
 of sync for no reason.
 
-## Enrollment flow
+## Joining a node
 
 1. Create the node in the panel (name, address, agent port, role, placement).
 2. Mint a join token: `POST /panel/api/nodes/token/:id`. It is returned **once**;
    only its hash is stored.
-3. On the node machine, the agent posts the token to `POST <base>/node/enroll`
-   and receives its long-lived bearer token.
-4. The agent posts `POST <base>/node/heartbeat` every 30 seconds and pulls
-   `GET <base>/node/config` whenever the hash it is told about differs from the
-   one it applied.
+3. On the node machine, as root:
+
+```
+bash <(curl -fsSL raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-node-install.sh) --url PANEL_URL --token JOIN_TOKEN
+```
+
+`PANEL_URL` must include the panel's **secret path**, because that is where the
+agent routes live. A url without it fails with a 404 that the agent translates
+into exactly that advice.
 
 Enrolling again replaces the bearer token, which is also how a node is rotated
-after a machine is rebuilt or a token is suspected leaked.
+after a machine is rebuilt or a token is suspected leaked:
+
+```
+sr-node -url PANEL_URL -token NEW_JOIN_TOKEN -dir /etc/sr-node -once
+systemctl restart sr-node
+```
 
 ### Why tokens are only ever stored hashed
 
-Both token kinds are stored as SHA-256 and compared by hash lookup. A stolen
-panel database must not also be a working set of node credentials, and the raw
-token is never compared against anything.
+Both token kinds are stored as SHA-256 on the panel and compared by hash lookup.
+A stolen panel database must not also be a working set of node credentials, and
+the raw token is never compared against anything.
+
+On the node the bearer token lives in `/etc/sr-node/agent.json`, written 0600 in
+a 0700 directory, with the unit running at `UMask=0077`.
 
 ### Certificate pinning
 
 `fingerprint` holds the SHA-256 of the agent's TLS certificate. Agents are
 reached by address with self-signed certificates, where a valid chain proves
 nothing and a pin proves everything - and the control channel carries account
-credentials.
+credentials. (Stored today; enforced when the master starts dialing agents.)
 
 ## Panel API
 
@@ -217,6 +229,54 @@ duplicating them into a per-node snapshot would create a second copy that
 drifts. `relayViaAddress` is the next hop's identity, not a dialable target: the
 port a relay forwards to belongs to the inbound it forwards.
 
+## The agent
+
+`cmd/sr-node`, shipped as `sr-node-amd64` and `sr-node-arm64` on every release.
+It is built with CGO off, so the same static binary runs on musl, on an old
+glibc, or in a minimal image without a toolchain.
+
+| Flag | Meaning |
+| --- | --- |
+| `-url` | panel base url, including the secret path |
+| `-token` | join token; enrolls, and re-enrolls when given again |
+| `-dir` | state directory (default `/etc/sr-node`) |
+| `-apply` | program run after a new config is stored |
+| `-core` | xray binary, read only to report its version |
+| `-interval` | seconds between heartbeats, overriding the panel |
+| `-insecure` | accept a self-signed panel certificate |
+| `-once` | one cycle and exit; how the installer proves the channel works |
+
+State lives in two files: `agent.json` (panel url, bearer token, node identity,
+applied hash) and `bundle.json` (the last assignment received). Both are written
+by rename, never in place, so a crash or a full disk cannot leave half a
+credential behind.
+
+Nothing inside a cycle is fatal. A panel that is restarting, a network that
+drops for a minute, or a config that fails to apply are all retried on the next
+tick; exiting would turn a transient failure into an outage.
+
+### The apply hook
+
+The agent does not yet know how to turn an assignment into a running Xray
+config. Rather than pretend, it stores the bundle and runs a hook if one exists:
+`-apply PATH`, or an executable `apply.sh` in the state directory.
+
+The hook receives the bundle path as its first argument and in the environment:
+
+| Variable | Value |
+| --- | --- |
+| `SR_NODE_BUNDLE` | path to the stored bundle |
+| `SR_NODE_HASH` | the assignment's hash |
+| `SR_NODE_ID` | node id on the panel |
+| `SR_NODE_NAME` | node name |
+| `SR_NODE_ROLE` | `edge` or `relay` |
+
+**The applied hash only advances when the hook exits 0.** With no hook, the node
+keeps reporting out of sync with the reason attached, and the panel shows it.
+That is accurate: the assignment arrived, and nothing on that machine is serving
+it. A fleet page that says "in sync" while no traffic can flow is worse than one
+that admits what it does not know.
+
 ## Liveness
 
 Agents beat every 30 seconds and a node stays `online` for **95 seconds** after
@@ -229,14 +289,13 @@ worse than not having one. `NodeService.MarkStale()` turns silence into
 
 Stated plainly so this page is not read as a promise:
 
-- **Per-inbound config generation on the node.** The bundle carries the
-  assignment; turning it into the node's Xray config and applying it is the next
-  piece.
-- **The agent binary and its installer.** The channel it will speak is fixed by
-  this page.
+- **Config generation.** The panel hands out an assignment; rendering it into
+  the node's Xray config, and the built-in apply step that replaces the hook, is
+  the next piece.
 - **The Nodes page in the panel UI.** The API above is complete and usable with
   a session cookie in the meantime.
 - **Per-node traffic attribution.** `up` and `down` are reported totals; folding
   them into per-account accounting comes with the traffic job work.
 - **Node-scoped subscription links.** `public_host` is stored and not yet used
   by link generation.
+- **Agent certificate pinning.** `fingerprint` is stored but not enforced.
