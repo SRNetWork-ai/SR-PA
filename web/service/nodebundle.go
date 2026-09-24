@@ -20,15 +20,16 @@ type NodeBundleInbound struct {
 	RemotePort int `json:"remotePort"`
 }
 
-// NodeBundle is the assignment descriptor for one node: which inbounds it
-// serves, whether it egresses itself or forwards to another node, and a hash of
-// exactly that.
+// NodeBundle is everything a node needs: which inbounds it serves, whether it
+// egresses itself or forwards to another node, the rendered Xray config, and a
+// hash of exactly that.
 //
-// It is deliberately an assignment and not a finished Xray config. The panel's
-// inbound records already own protocol settings, TLS material and client lists,
-// and duplicating them into a per-node snapshot would create a second copy that
-// drifts. The agent asks for the bundle, then fetches what it needs for each
-// inbound it is assigned.
+// The assignment and the config are both here because they answer different
+// questions. The assignment is what an operator set and what the Nodes page
+// shows; the config is what the node actually runs. Keeping the first without
+// the second was the earlier design, and it had one fatal property: editing an
+// inbound changed nothing the hash could see, so nodes kept serving yesterday's
+// clients until somebody touched the assignment.
 type NodeBundle struct {
 	NodeId          int                 `json:"nodeId"`
 	Node            string              `json:"node"`
@@ -37,17 +38,19 @@ type NodeBundle struct {
 	RelayViaAddress string              `json:"relayViaAddress"`
 	RelayChain      []string            `json:"relayChain"`
 	Inbounds        []NodeBundleInbound `json:"inbounds"`
+	Config          json.RawMessage     `json:"config"`
+	Notes           []string            `json:"notes,omitempty"`
 	Hash            string              `json:"hash"`
 }
 
-// Bundle builds a node's descriptor and records its hash as the config the
-// master expects to be running.
+// Bundle builds a node's work and records its hash as the config the master
+// expects to be running.
 //
-// The hash covers the descriptor and nothing else, so it changes exactly when
-// what the node should be doing changes - not when it last checked in, not when
-// somebody edited its city. That is what makes the in-sync column trustworthy:
-// the master writes the hash it built, the agent reports the hash it applied,
-// and the panel only ever compares the two.
+// The hash covers the descriptor and the rendered config and nothing else, so
+// it changes exactly when what the node should be doing changes - not when it
+// last checked in, not when somebody edited its city. That is what makes the
+// in-sync column trustworthy: the master writes the hash it built, the agent
+// reports the hash it applied, and the panel only ever compares the two.
 func (s *NodeService) Bundle(nodeId int) (*NodeBundle, error) {
 	ensureNodeTables()
 
@@ -98,6 +101,13 @@ func (s *NodeService) Bundle(nodeId int) (*NodeBundle, error) {
 		return bundle.Inbounds[i].InboundId < bundle.Inbounds[j].InboundId
 	})
 
+	config, notes, err := s.XrayConfig(n.Id)
+	if err != nil {
+		return nil, err
+	}
+	bundle.Config = config
+	bundle.Notes = notes
+
 	bundle.Hash = nodeBundleHash(bundle)
 	if bundle.Hash != "" && bundle.Hash != n.ConfigHash {
 		// A read that writes, narrowly: the master only knows what it expects
@@ -113,6 +123,10 @@ func (s *NodeService) Bundle(nodeId int) (*NodeBundle, error) {
 func nodeBundleHash(b *NodeBundle) string {
 	flat := *b
 	flat.Hash = ""
+	// Notes describe the config, they are not part of it. Hashing them would put
+	// a node out of sync because an unrelated inbound was disabled somewhere, and
+	// send it off to re-apply a config byte-identical to the one it is running.
+	flat.Notes = nil
 	raw, err := json.Marshal(flat)
 	if err != nil {
 		return ""
