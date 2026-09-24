@@ -1,22 +1,48 @@
 name: build
 
-# The rebrand touches Go source (main.go, web/service/uninstall.go) that cannot
-# be compiled where it is edited, so CI is the compiler. Every push to main
-# applies the brand pass to a throwaway checkout and builds it: if a rule in
-# scripts/brand-sr-ui.sh ever rewrites something it should not have, the build
-# breaks here instead of on a server.
+# The rebrand rewrites Go source (main.go, web/service/uninstall.go) that cannot
+# be compiled where it is edited, so CI is the compiler: every push brands a
+# throwaway checkout and builds it. If a rule in scripts/brand-sr-ui.sh ever
+# rewrites something it should not, the build breaks here, not on a server.
+#
+# CI is also the release factory, and that is what makes installing fast. With no
+# asset to download, the installer has to fetch a Go toolchain, pull ~700 modules
+# and link a 70MB binary on whatever VPS it landed on: twenty minutes, and on a
+# 1GB box the linker gets OOM-killed. With an asset it is one download.
+#
+# Release builds also run build/core/build.sh, which fills corebundle/core -
+# gitignored, so empty in any checkout - with the pinned Xray core. That is the
+# difference between a panel whose inbounds work and one that answers
+# "fork/exec bin/xray-linux-amd64: no such file or directory" to every request,
+# including the Reality certificate and mldsa65 seed buttons, which generate
+# their keys by shelling out to the core.
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish as (empty = the rolling latest release)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
+# Two release runs racing to move the same rolling tag would be a coin flip over
+# which binary ends up published.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  check:
     name: brand + build
     runs-on: ubuntu-latest
     steps:
@@ -48,8 +74,99 @@ jobs:
           ls -lh sr-ui-amd64
           echo "panel name: $(cat config/name)"
 
-      - uses: actions/upload-artifact@v4
+  release:
+    name: publish binaries
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: sr-ui-amd64
-          path: sr-ui-amd64
-          retention-days: 14
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install the arm64 cross compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+
+      - name: Apply SR-UI branding
+        run: bash scripts/brand-sr-ui.sh
+
+      # GEO_LEAN keeps the four country geo files (~118MB) out of the binary; the
+      # panel downloads whichever one a routing rule names the first time it needs
+      # it. The base pair stays in, because a geo file the core cannot open is a
+      # fatal config parse error that takes every inbound down, not a lost rule.
+      - name: Bundle the pinned Xray core
+        env:
+          GEO_LEAN: '1'
+        run: bash build/core/build.sh amd64 arm64
+
+      - name: Build amd64
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -ldflags "-s -w" -o sr-ui-amd64 .
+
+      # A cross-compiled CGO build is the step that can legitimately fail on a
+      # runner, and an arm64 failure must not cost amd64 users their release.
+      - name: Build arm64
+        continue-on-error: true
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: arm64
+          CC: aarch64-linux-gnu-gcc
+        run: go build -trimpath -ldflags "-s -w" -o sr-ui-arm64 .
+
+      - name: Checksums
+        run: |
+          ls -lh sr-ui-*
+          sha256sum sr-ui-* > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/*) TAG="${GITHUB_REF#refs/tags/}" ;;
+              *) TAG="latest" ;;
+            esac
+          fi
+          printf '%s\n' \
+            "Prebuilt SR-UI panel, built from ${GITHUB_SHA:0:12}." \
+            "" \
+            "The pinned Xray core and the base geo data are bundled inside the" \
+            "binary, so the panel has a working core the moment it starts." \
+            "" \
+            "Install or upgrade:" \
+            "" \
+            "    bash <(curl -fsSL raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-ui-install.sh)" \
+            > notes.md
+          # A release is pinned to the commit it was cut from, so the rolling tag
+          # is replaced rather than re-uploaded into. It must stay a normal
+          # release: the /releases/latest endpoint the installer asks for skips
+          # prereleases, and would keep handing out an older build.
+          if [ "$TAG" = "latest" ]; then
+            gh release delete latest --yes --cleanup-tag || true
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" sr-ui-* sha256sums.txt --clobber
+          else
+            gh release create "$TAG" sr-ui-* sha256sums.txt \
+              --target "$GITHUB_SHA" \
+              --title "SR-UI $TAG" \
+              --notes-file notes.md
+          fi
