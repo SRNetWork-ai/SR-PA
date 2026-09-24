@@ -66,6 +66,15 @@ func (a *APIController) initRouter(g *gin.RouterGroup, customGeo *service.Custom
 	devices.Use(requirePerm(model.PermAccessInbounds))
 	NewDeviceController(devices)
 
+	// Nodes: the machines that serve this panel's inbounds from somewhere else.
+	// The group opens at panel-settings level because fleet health is an operations
+	// view, while every mutation inside asks for super admin separately. A node is
+	// handed account credentials and can be pointed at any address, so creating one
+	// is closer to handing over the panel than to editing an inbound.
+	nodes := api.Group("/nodes")
+	nodes.Use(requirePerm(model.PermPanelSettings))
+	NewNodeController(nodes)
+
 	// Server API
 	server := api.Group("/server")
 	a.serverController = NewServerController(server)
@@ -83,6 +92,14 @@ func (a *APIController) initRouter(g *gin.RouterGroup, customGeo *service.Custom
 	// Mails the entire SQLite DB (every admin's inbounds, client credentials, and
 	// the users table with its bcrypt hashes) to a Telegram chat: escalation-class.
 	api.GET("/backuptotgbot", requireOverviewManage(), a.BackuptoTgbot)
+
+	// The node agents' own control channel, mounted on the ROOT group and not
+	// inside /panel/api. An agent holds no session, so sending it through
+	// checkAPIAuth would 404 every heartbeat; it presents the bearer token it
+	// received when it enrolled instead. The routes still live behind the panel's
+	// secret base path, which is why an agent is handed a full URL at enrollment
+	// and why nothing scanning the internet finds them.
+	NewNodeAgentController(g)
 }
 
 // BackuptoTgbot sends a backup of the panel data to Telegram bot admins.
