@@ -26,6 +26,16 @@ const (
 	// and a per-node setting would be one more thing to get wrong for no gain.
 	nodeApiPort = 62790
 
+	// NodeMetricsPort is where the same Xray publishes its counters as expvar
+	// JSON, also on loopback.
+	//
+	// The gRPC API above can already report traffic, and on the panel's own host
+	// that is exactly how it is read. It is the wrong tool on a node: a gRPC
+	// client means importing the core packages, and importing those into the
+	// agent means shipping the 160 MB embedded core to every edge box to move a
+	// few counters. One HTTP GET and encoding/json cost nothing.
+	NodeMetricsPort = 62791
+
 	// NodeMasterAddress stands in for "the panel itself" as a relay's egress.
 	//
 	// The master genuinely cannot know the address a node reaches it on - that is
@@ -42,8 +52,9 @@ var (
 	nodeStatsConfig     = json.RawMessage(`{}`)
 	nodeApiConfig       = json.RawMessage(`{"tag":"api","services":["HandlerService","StatsService","LoggerService"]}`)
 	nodeApiSettings     = json.RawMessage(`{"address":"127.0.0.1"}`)
+	nodeMetricsConfig   = json.RawMessage(`{"tag":"metrics"}`)
 	nodeOutboundsConfig = json.RawMessage(`[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"blocked"}]`)
-	nodeRoutingConfig   = json.RawMessage(`{"domainStrategy":"AsIs","rules":[{"type":"field","inboundTag":["api"],"outboundTag":"api"}]}`)
+	nodeRoutingConfig   = json.RawMessage(`{"domainStrategy":"AsIs","rules":[{"type":"field","inboundTag":["api"],"outboundTag":"api"},{"type":"field","inboundTag":["metrics"],"outboundTag":"metrics"}]}`)
 
 	// Per-user counters are on from the first byte a node forwards. Turning them
 	// on later would mean a restart, and a restart means dropping every live
@@ -63,6 +74,7 @@ type nodeXrayInbound struct {
 type nodeXrayConfig struct {
 	Log       json.RawMessage   `json:"log"`
 	API       json.RawMessage   `json:"api"`
+	Metrics   json.RawMessage   `json:"metrics"`
 	Stats     json.RawMessage   `json:"stats"`
 	Policy    json.RawMessage   `json:"policy"`
 	Inbounds  []nodeXrayInbound `json:"inbounds"`
@@ -137,6 +149,7 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 	cfg := nodeXrayConfig{
 		Log:       nodeLogConfig,
 		API:       nodeApiConfig,
+		Metrics:   nodeMetricsConfig,
 		Stats:     nodeStatsConfig,
 		Policy:    nodePolicyConfig,
 		Outbounds: nodeOutboundsConfig,
@@ -147,6 +160,12 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 			Protocol: "dokodemo-door",
 			Settings: nodeApiSettings,
 			Tag:      "api",
+		}, {
+			Listen:   "127.0.0.1",
+			Port:     NodeMetricsPort,
+			Protocol: "dokodemo-door",
+			Settings: nodeApiSettings,
+			Tag:      "metrics",
 		}},
 	}
 
@@ -164,7 +183,12 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 	sort.Ints(ids)
 
 	inbounds := InboundService{}
-	taken := map[int]int{}
+
+	// Seeded with the agent's own two sockets. They are bound to 127.0.0.1 while
+	// an inbound binds every interface, and the kernel refuses the second bind
+	// either way - which Xray reports by refusing the config outright, taking
+	// every other inbound on the node down with it.
+	taken := map[int]int{nodeApiPort: 0, NodeMetricsPort: 0}
 
 	for _, id := range ids {
 		inbound, inboundErr := inbounds.GetInbound(id)
@@ -198,7 +222,11 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 		if other, clash := taken[port]; clash {
 			// Xray refuses the entire config over one duplicate port, so a clash has
 			// to cost one inbound rather than the whole node.
-			notes = append(notes, inboundLabel(inbound)+" wants port "+strconv.Itoa(port)+", which inbound #"+strconv.Itoa(other)+" already uses on this node")
+			if other == 0 {
+				notes = append(notes, inboundLabel(inbound)+" wants port "+strconv.Itoa(port)+", which the node agent reserves for itself; give it a different port for this node")
+			} else {
+				notes = append(notes, inboundLabel(inbound)+" wants port "+strconv.Itoa(port)+", which inbound #"+strconv.Itoa(other)+" already uses on this node")
+			}
 			continue
 		}
 
