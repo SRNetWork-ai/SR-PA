@@ -75,6 +75,10 @@ type nodeSaveRequest struct {
 }
 
 func (a *NodeController) list(c *gin.Context) {
+	// One of the two doors into the node subsystem, so one of the two places the
+	// staleness sweep is started. Idempotent: the service starts it once.
+	service.StartNodeJanitor()
+
 	rows, err := a.nodeService.List()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -305,6 +309,10 @@ func (a *NodeAgentController) authenticate(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "msg": err.Error()})
 		return
 	}
+	// The other door: a node calling home proves the fleet is live even if no
+	// operator has opened the page since the panel started, which is exactly the
+	// case where stale online rows would otherwise sit unswept.
+	service.StartNodeJanitor()
 	c.Set("node_id", node.Id)
 	c.Next()
 }
