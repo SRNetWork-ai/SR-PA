@@ -39,6 +39,19 @@ func (a *APIController) checkAPIAuth(c *gin.Context) {
 func (a *APIController) initRouter(g *gin.RouterGroup, customGeo *service.CustomGeoService) {
 	// Main API group
 	api := g.Group("/panel/api")
+
+	// Token authentication, BEFORE the session check below.
+	//
+	// This is the entire integration surface for API tokens: a token is resolved
+	// into a scoped copy of its owning admin for the life of one request, and from
+	// that point on every group registered here is gated by the same permission
+	// middleware as a browser session. No group needs to know tokens exist, and
+	// there is no second authorization path that could drift from this one.
+	//
+	// It is deliberately inert for a request that carries no token: those still
+	// reach checkAPIAuth and still get the panel's 404, so the API keeps hiding
+	// itself from anyone who has not authenticated.
+	api.Use(apiTokenAuth())
 	api.Use(a.checkAPIAuth)
 
 	// Inbounds API
@@ -74,6 +87,13 @@ func (a *APIController) initRouter(g *gin.RouterGroup, customGeo *service.Custom
 	nodes := api.Group("/nodes")
 	nodes.Use(requirePerm(model.PermPanelSettings))
 	NewNodeController(nodes)
+
+	// API tokens. Inside this group so an anonymous caller gets the same 404 as
+	// everything else, and gated from within by super admin AND a refusal for
+	// token-authenticated callers: a credential that can mint credentials escapes
+	// its own scope in a single call.
+	tokens := api.Group("/tokens")
+	NewApiTokenController(tokens)
 
 	// Server API
 	server := api.Group("/server")
