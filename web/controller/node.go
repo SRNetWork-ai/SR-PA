@@ -39,6 +39,8 @@ func (a *NodeController) initRouter(g *gin.RouterGroup) {
 	g.POST("/list", a.list)
 	g.GET("/locations", a.locations)
 	g.GET("/inbounds/:id", a.inbounds)
+	g.GET("/preview/:id", a.preview)
+	g.POST("/preview/:id", a.preview)
 
 	super := requireSuperAdmin()
 	g.POST("/save", super, a.save)
@@ -88,6 +90,37 @@ func (a *NodeController) locations(c *gin.Context) {
 		return
 	}
 	jsonObj(c, locations, nil)
+}
+
+// preview answers with the same bundle the node's agent receives: the rendered
+// Xray config, the resolved relay chain, the inbounds that made it in, and the
+// notes explaining every one that did not.
+//
+// Those notes were the point of adding this. A node can be online, in sync and
+// serving nothing at all, because the single inbound assigned to it is disabled,
+// or uses a protocol no node can run, or had its last client expire - and each
+// of those cases already writes a sentence saying so. Showing that sentence only
+// to the agent meant the one explanation of the problem was in the one place
+// nobody reads.
+//
+// Note that building a bundle records the hash the master expects, so this read
+// writes a value. It is safe: the hash is derived from the current inbounds and
+// assignment, so a preview stores exactly what the next agent poll would store,
+// and a preview between two polls cannot push a node out of sync.
+func (a *NodeController) preview(c *gin.Context) {
+	id, err := nodeRouteId(c)
+	if err != nil {
+		jsonMsg(c, err.Error(), err)
+		return
+	}
+	bundle, err := a.nodeService.Bundle(id)
+	if err != nil {
+		// Shown verbatim: the failure here is usually "node not found" or a relay
+		// chain that cannot be resolved, and both are answers an operator acts on.
+		jsonMsg(c, err.Error(), err)
+		return
+	}
+	jsonObj(c, bundle, nil)
 }
 
 func (a *NodeController) save(c *gin.Context) {
