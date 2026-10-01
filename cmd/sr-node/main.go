@@ -2,8 +2,9 @@
 //
 // It runs on a serving machine, enrolls once against the panel with a
 // single-use join token, then reports in every 30 seconds, pulls its config
-// whenever the panel answers with a hash it is not already running, and runs
-// that config on an Xray it supervises itself.
+// whenever the panel answers with a hash it is not already running, runs that
+// config on an Xray it supervises itself, and sends back the traffic that core
+// measured so a quota means the same thing on a node as it does on the master.
 //
 // It claims nothing it has not done. A config the core refuses, a core that
 // dies a second after starting, a node with no core installed at all: each of
@@ -36,7 +37,7 @@ import (
 )
 
 const (
-	agentVersion   = "0.2.0"
+	agentVersion   = "0.3.0"
 	defaultTick    = 30 * time.Second
 	minTick        = 5 * time.Second
 	httpTimeout    = 20 * time.Second
@@ -224,7 +225,8 @@ func run(opts options) error {
 	}
 }
 
-// cycle is one heartbeat and, if the panel says this node is behind, one sync.
+// cycle is one heartbeat, the traffic this node served since the last one, and,
+// if the panel says this node is behind, one sync.
 //
 // Nothing in here is fatal. A panel that is restarting, a network that drops for
 // a minute or a config that fails to apply are all things the next tick should
@@ -244,6 +246,20 @@ func (a *agent) cycle() {
 		return
 	}
 	a.latency = time.Since(start).Milliseconds()
+
+	// After the heartbeat and before any sync: bytes this node has already
+	// served are owed to the panel whether or not it is about to be handed new
+	// work, and a config change must not quietly swallow the interval it landed
+	// in.
+	//
+	// Logged but deliberately not kept in lastErr. That field is the reason the
+	// fleet page gives for a node being out of sync, and an accounting hiccup
+	// there would send the operator after the wrong problem. Nothing is lost
+	// either way: the agent only moves its counters forward on a report the
+	// panel accepted, so a failed one is re-sent whole next tick.
+	if err := a.reportTraffic(); err != nil {
+		log.Printf("sr-node: %v", err)
+	}
 
 	if resp.ConfigHash == "" || resp.ConfigHash == a.st.AppliedHash {
 		if resp.ConfigHash != "" && xrayCore.Running() {
