@@ -5,8 +5,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/mhsanaei/3x-ui/v2/database"
 	"github.com/mhsanaei/3x-ui/v2/database/model"
+	"github.com/mhsanaei/3x-ui/v2/logger"
+	"github.com/mhsanaei/3x-ui/v2/xray"
 )
 
 // A node runs a stock Xray and nothing else. Everything it does is decided
@@ -97,6 +101,10 @@ type nodeForwardSettings struct {
 // with the config to the Nodes page instead of dying in a log file: "disabled
 // in the panel", "not assigned to the next hop", "the panel runs that protocol
 // itself". A silent omission here looks exactly like a broken node.
+//
+// Client lists are filtered on the way out, so an account the panel has
+// disabled, expired or exhausted stops working on the node too. See
+// nodeFilterClients for why that has to happen here.
 func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) {
 	ensureNodeTables()
 
@@ -182,6 +190,11 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 	// assignment rather than on the order SQLite felt like returning rows in.
 	sort.Ints(ids)
 
+	// One query for every assigned inbound rather than one per inbound: this runs
+	// on every config fetch, and a node fleet asking in a loop is not the place
+	// to be generous with round trips.
+	blocked := nodeBlockedClients(ids)
+
 	inbounds := InboundService{}
 
 	// Seeded with the agent's own two sockets. They are bound to 127.0.0.1 while
@@ -253,6 +266,8 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 			// A relay moves bytes and terminates nothing: no TLS, no Reality keys, no
 			// client list. The handshake belongs to the node at the end of the chain,
 			// which is the point - a seized relay gives up nothing but a destination.
+			// It is also why no client filtering happens on this path: there is no
+			// client list here to filter, and the node at the end has one.
 			cfg.Inbounds = append(cfg.Inbounds, nodeXrayInbound{
 				Port:     port,
 				Protocol: "dokodemo-door",
@@ -269,13 +284,22 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 			notes = append(notes, inboundLabel(inbound)+" names certificate files by path; copy them to the node at the same paths, or switch the inbound to inline certificates")
 		}
 
+		settings, cut, usable := nodeFilterClients(nodeRawJson(string(inbound.Settings)), blocked)
+		if !usable {
+			notes = append(notes, inboundLabel(inbound)+" has no client left that may connect (all of them are disabled, expired or out of traffic), and an empty client list is a config Xray refuses, so the node does not open it")
+			continue
+		}
+		if cut > 0 {
+			notes = append(notes, strconv.Itoa(cut)+" client(s) on "+inboundLabel(inbound)+" are disabled, expired or out of traffic and were left out of this node's config")
+		}
+
 		// Listen is deliberately dropped: an address that pins the inbound to one
 		// interface on the panel's host is, on a different host, either meaningless
 		// or an address that does not exist there.
 		cfg.Inbounds = append(cfg.Inbounds, nodeXrayInbound{
 			Port:           port,
 			Protocol:       string(inbound.Protocol),
-			Settings:       nodeRawJson(string(inbound.Settings)),
+			Settings:       settings,
 			StreamSettings: nodeRawJson(stream),
 			Tag:            "inbound-" + strconv.Itoa(id),
 		})
@@ -287,6 +311,142 @@ func (s *NodeService) XrayConfig(nodeId int) (json.RawMessage, []string, error) 
 		return nil, notes, err
 	}
 	return json.RawMessage(raw), notes, nil
+}
+
+// nodeBlockedClients lists the accounts that must not be handed to a node,
+// keyed by the email the client list uses.
+//
+// Enforcement on the panel's own core works by removing a user from it when its
+// quota runs out. A node has no such reconciler - it applies a config and
+// serves it - so the enforcement has to happen before the config is rendered,
+// or not at all.
+//
+// A database it cannot read yields an empty set, which keeps serving everyone
+// rather than cutting the fleet off over one failed query. Over-serving for a
+// few minutes is recoverable; an outage caused by the accounting layer is the
+// kind of failure that makes operators stop using nodes.
+func nodeBlockedClients(inboundIds []int) map[string]bool {
+	blocked := map[string]bool{}
+	if len(inboundIds) == 0 {
+		return blocked
+	}
+	db := database.GetDB()
+	if db == nil {
+		return blocked
+	}
+
+	var rows []xray.ClientTraffic
+	if err := db.Where("inbound_id in ?", inboundIds).Find(&rows).Error; err != nil {
+		logger.Warning("nodes: reading client quotas for a node config:", err)
+		return blocked
+	}
+
+	now := time.Now().UnixMilli()
+	for _, row := range rows {
+		email := strings.TrimSpace(row.Email)
+		if email == "" {
+			continue
+		}
+		switch {
+		case !row.Enable:
+		case row.ExpiryTime > 0 && row.ExpiryTime <= now:
+			// Only positive values are deadlines. A negative expiry is the panel's
+			// delayed start: the countdown has not begun because the client has
+			// never connected, and treating it as long expired would cut off every
+			// account that was sold but not yet used.
+		case row.Total > 0 && row.Up+row.Down >= row.Total:
+		default:
+			continue
+		}
+		blocked[email] = true
+	}
+	return blocked
+}
+
+// nodeFilterClients removes the clients a node must not serve, returning the
+// settings to ship, how many clients were cut, and whether what is left can be
+// served at all.
+//
+// Two signals, because they fail in different directions: client_traffics knows
+// about quota and expiry but only has a row once a client has been counted,
+// while the client's own enable flag is set the moment an operator switches it
+// off in the panel.
+//
+// The cost of doing this is a real one and worth stating: cutting a client
+// changes the rendered config, which changes its hash, so the node restarts its
+// core on the next tick and the connections it was serving are dropped with it.
+// The alternative is an expired account that works forever as long as it
+// connects to a node, which is not a quota.
+func nodeFilterClients(settings json.RawMessage, blocked map[string]bool) (json.RawMessage, int, bool) {
+	if len(settings) == 0 {
+		return settings, 0, true
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(settings, &obj); err != nil {
+		return settings, 0, true
+	}
+	raw, ok := obj["clients"]
+	if !ok {
+		// Shadowsocks with one password, WireGuard peers, anything that keeps no
+		// client list: nothing here to enforce against.
+		return settings, 0, true
+	}
+	var clients []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &clients); err != nil || len(clients) == 0 {
+		return settings, 0, true
+	}
+
+	kept := make([]map[string]json.RawMessage, 0, len(clients))
+	cut := 0
+	for _, client := range clients {
+		if nodeClientAllowed(client, blocked) {
+			kept = append(kept, client)
+			continue
+		}
+		cut++
+	}
+	if cut == 0 {
+		// Returned byte for byte rather than re-encoded: an untouched inbound must
+		// hash the same every time, and re-marshalling would reorder keys and
+		// churn the hash on nodes that have no reason to resync.
+		return settings, 0, true
+	}
+	if len(kept) == 0 {
+		return nil, cut, false
+	}
+
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return settings, 0, true
+	}
+	obj["clients"] = json.RawMessage(encoded)
+	rendered, err := json.Marshal(obj)
+	if err != nil {
+		return settings, 0, true
+	}
+	return json.RawMessage(rendered), cut, true
+}
+
+func nodeClientAllowed(client map[string]json.RawMessage, blocked map[string]bool) bool {
+	if raw, ok := client["enable"]; ok {
+		var enable bool
+		if err := json.Unmarshal(raw, &enable); err == nil && !enable {
+			return false
+		}
+	}
+	raw, ok := client["email"]
+	if !ok {
+		// No email means no counter, no quota and nothing to match against. Left
+		// in place: the incomplete record is the panel's own, and a client that
+		// silently stops working on nodes only would be impossible to explain
+		// from the UI.
+		return true
+	}
+	var email string
+	if err := json.Unmarshal(raw, &email); err != nil {
+		return true
+	}
+	return !blocked[strings.TrimSpace(email)]
 }
 
 // nodeRawJson passes stored JSON through untouched, and drops anything that is
