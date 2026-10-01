@@ -14,12 +14,13 @@
                   <a-tag color="blue">[[ nodes.length ]] total</a-tag>
                   <a-tag :color="nodes.length && onlineCount === nodes.length ? 'green' : 'orange'">[[ onlineCount ]] online</a-tag>
                   <a-tag :color="nodes.length && syncCount === nodes.length ? 'green' : 'orange'">[[ syncCount ]] in sync</a-tag>
+                  <a-tag v-if="errorCount" color="red">[[ errorCount ]] reporting errors</a-tag>
                 </div>
               </a-card>
 
               <a-card hoverable :bodyStyle="{ padding: 0 }">
                 <a-table :columns="columns" :row-key="r => r.id" :data-source="nodes"
-                  :scroll="isMobile ? {} : { x: 1000 }" :pagination="false" bordered
+                  :scroll="isMobile ? {} : { x: 1160 }" :pagination="false" bordered
                   :locale='{ emptyText: `{{ i18n "noData" }}` }'>
 
                   <template slot="name" slot-scope="text, node">
@@ -54,8 +55,14 @@
 
                   <template slot="sync" slot-scope="text, node">
                     <a-tag :color="isSynced(node) ? 'green' : 'orange'">[[ isSynced(node) ? 'in sync' : 'pending' ]]</a-tag>
+                    <!-- The last error used to live in a tooltip, which meant a node
+                         whose core refuses to start looked exactly like a healthy one
+                         until someone happened to hover over it. It is on the row now. -->
                     <a-tooltip v-if="node.lastError" :title="node.lastError">
-                      <a-icon type="warning" :style="{ color: 'var(--error)', marginLeft: '4px' }"></a-icon>
+                      <div :style="{ fontSize: '11px', color: 'var(--error)', cursor: 'help' }">
+                        <a-icon type="warning"></a-icon>
+                        [[ errorText(node.lastError) ]]
+                      </div>
                     </a-tooltip>
                   </template>
 
@@ -63,11 +70,23 @@
                     <a-button size="small" @click="openAssign(node)">[[ inboundCount(node) ]]</a-button>
                   </template>
 
+                  <template slot="traffic" slot-scope="text, node">
+                    <div :style="{ fontSize: '12px' }">up [[ fmtBytes(node.up) ]]</div>
+                    <div :style="{ fontSize: '12px' }">down [[ fmtBytes(node.down) ]]</div>
+                    <div v-if="!node.up && !node.down" :style="{ fontSize: '11px', color: '#8c8c8c' }">nothing billed yet</div>
+                  </template>
+
                   <template slot="load" slot-scope="text, node">
                     <div :style="{ fontSize: '12px' }">
                       cpu [[ pct(node.cpuPct) ]] / ram [[ pct(node.memPct) ]] / disk [[ pct(node.diskPct) ]]
                     </div>
                     <div :style="{ fontSize: '11px', color: '#8c8c8c' }">agent [[ node.agentVersion || '-' ]]</div>
+                    <!-- An empty core version is the signature of the failure this
+                         panel has hit on real servers: the agent is fine, the core
+                         binary is missing, and the node serves nothing. -->
+                    <div :style="{ fontSize: '11px', color: node.coreVersion ? '#8c8c8c' : 'var(--error)' }">
+                      core [[ node.coreVersion || 'not running' ]]
+                    </div>
                   </template>
 
                   <template slot="action" slot-scope="text, node">
@@ -82,6 +101,10 @@
                         <a-menu-item @click="openAssign(node)">
                           <a-icon type="api"></a-icon>
                           <span>Inbounds</span>
+                        </a-menu-item>
+                        <a-menu-item @click="openPreview(node)">
+                          <a-icon type="file-text"></a-icon>
+                          <span>Rendered config</span>
                         </a-menu-item>
                         <a-menu-item @click="mintToken(node)">
                           <a-icon type="key"></a-icon>
@@ -107,118 +130,13 @@
         </transition>
       </a-spin>
 
-      <a-modal v-model="edit.visible" :class="themeSwitcher.currentTheme"
-        :title="edit.isEdit ? 'Edit node' : 'Add node'" :confirm-loading="edit.loading"
-        ok-text='{{ i18n "confirm" }}' cancel-text='{{ i18n "cancel" }}' @ok="saveNode">
-        <a-form layout="vertical">
-          <a-form-item label="Name">
-            <a-input v-model.trim="edit.model.name" placeholder="de-edge-1"></a-input>
-          </a-form-item>
-          <a-row :gutter="8">
-            <a-col :span="16">
-              <a-form-item label="Agent address">
-                <a-input v-model.trim="edit.model.address" placeholder="node address or domain"></a-input>
-              </a-form-item>
-            </a-col>
-            <a-col :span="8">
-              <a-form-item label="Agent port">
-                <a-input-number v-model="edit.model.port" :min="1" :max="65535" :style="{ width: '100%' }"></a-input-number>
-              </a-form-item>
-            </a-col>
-          </a-row>
-          <a-row :gutter="8">
-            <a-col :span="12">
-              <a-form-item label="Role">
-                <a-select v-model="edit.model.role">
-                  <a-select-option value="edge">edge - traffic leaves here</a-select-option>
-                  <a-select-option value="relay">relay - forward to another node</a-select-option>
-                </a-select>
-              </a-form-item>
-            </a-col>
-            <a-col :span="12" v-if="edit.model.role === 'relay'">
-              <a-form-item label="Relay via">
-                <a-select v-model="edit.model.relayViaId">
-                  <a-select-option :value="0">- pick a node -</a-select-option>
-                  <a-select-option v-for="n in relayTargets" :key="n.id" :value="n.id">[[ n.name ]]</a-select-option>
-                </a-select>
-              </a-form-item>
-            </a-col>
-          </a-row>
-          <a-row :gutter="8">
-            <a-col :span="8">
-              <a-form-item label="Country code">
-                <a-input v-model.trim="edit.model.countryCode" placeholder="DE"></a-input>
-              </a-form-item>
-            </a-col>
-            <a-col :span="8">
-              <a-form-item label="City">
-                <a-input v-model.trim="edit.model.city" placeholder="Frankfurt"></a-input>
-              </a-form-item>
-            </a-col>
-            <a-col :span="8">
-              <a-form-item label="Provider">
-                <a-input v-model.trim="edit.model.provider" placeholder="hetzner"></a-input>
-              </a-form-item>
-            </a-col>
-          </a-row>
-          <a-form-item label="Public host for client links">
-            <a-input v-model.trim="edit.model.publicHost" placeholder="leave empty to use the node address"></a-input>
-          </a-form-item>
-          <a-form-item label="Tags">
-            <a-input v-model.trim="edit.model.tags" placeholder="comma separated, free form"></a-input>
-          </a-form-item>
-          <a-row :gutter="8">
-            <a-col :span="12">
-              <a-form-item label="Agent speaks TLS">
-                <a-switch v-model="edit.model.useTls"></a-switch>
-              </a-form-item>
-            </a-col>
-            <a-col :span="12">
-              <a-form-item label="Enabled">
-                <a-switch v-model="edit.model.enable"></a-switch>
-              </a-form-item>
-            </a-col>
-          </a-row>
-        </a-form>
-      </a-modal>
-
-      <a-modal v-model="assign.visible" :class="themeSwitcher.currentTheme"
-        :title="'Inbounds on ' + assign.nodeName" :confirm-loading="assign.loading"
-        ok-text='{{ i18n "confirm" }}' cancel-text='{{ i18n "cancel" }}' @ok="saveAssign">
-        <p :style="{ color: '#8c8c8c' }">
-          Checked inbounds are served by this node. The agent picks the change up on its next heartbeat.
-        </p>
-        <a-checkbox-group v-model="assign.selected" :style="{ width: '100%' }">
-          <div v-for="ib in inbounds" :key="ib.id" :style="{ padding: '2px 0' }">
-            <a-checkbox :value="ib.id">[[ inboundLabel(ib) ]]</a-checkbox>
-          </div>
-        </a-checkbox-group>
-        <p v-if="!inbounds.length" :style="{ color: '#8c8c8c' }">No inbounds to assign yet.</p>
-      </a-modal>
-
-      <a-modal v-model="token.visible" :class="themeSwitcher.currentTheme"
-        :title="'Join token for ' + token.nodeName" :footer="null" :width="680">
-        <a-alert type="warning" show-icon message="Shown once"
-          description="Single use, valid for 30 minutes. The panel keeps only its hash, so copy it now."></a-alert>
-        <div :style="{ marginTop: '12px' }">
-          <a-input read-only :value="token.value"></a-input>
-        </div>
-        <div :style="{ marginTop: '12px' }">
-          <a-textarea read-only :value="token.command" :rows="4"></a-textarea>
-        </div>
-        <p :style="{ marginTop: '8px', color: '#8c8c8c', fontSize: '12px' }">
-          Run it as root on the new server. Add --insecure if this panel serves a self signed certificate.
-        </p>
-        <div :style="{ display: 'flex', gap: '8px' }">
-          <a-button type="primary" icon="copy" @click="copy(token.command)">Copy install command</a-button>
-          <a-button icon="copy" @click="copy(token.value)">Copy token</a-button>
-        </div>
-      </a-modal>
+{{template "component/nodeModals" .}}
 {{template "page/shell_end" . }}
 
 {{template "page/body_scripts" .}}
 {{template "component/aSidebar" .}}
 {{template "component/aThemeSwitch" .}}
+{{template "component/nodeModalsScript" .}}
 
 <script>
   // Kept in step with nodeOnlineWindow in web/service/node.go. The page derives
@@ -233,9 +151,10 @@
     { title: 'Agent', align: 'center', width: 130, scopedSlots: { customRender: 'address' } },
     { title: 'Location', align: 'center', width: 110, scopedSlots: { customRender: 'place' } },
     { title: '{{ i18n "status" }}', align: 'center', width: 100, scopedSlots: { customRender: 'status' } },
-    { title: 'Config', align: 'center', width: 100, scopedSlots: { customRender: 'sync' } },
+    { title: 'Config', align: 'center', width: 130, scopedSlots: { customRender: 'sync' } },
     { title: 'Inbounds', align: 'center', width: 70, scopedSlots: { customRender: 'inbounds' } },
-    { title: 'Load', align: 'center', width: 140, scopedSlots: { customRender: 'load' } },
+    { title: 'Traffic', align: 'center', width: 110, scopedSlots: { customRender: 'traffic' } },
+    { title: 'Load', align: 'center', width: 150, scopedSlots: { customRender: 'load' } },
     { title: '', align: 'center', width: 30, scopedSlots: { customRender: 'action' } },
   ];
 
@@ -247,7 +166,7 @@
 
   const app = new Vue({
     delimiters: ['[[', ']]'],
-    mixins: [MediaQueryMixin],
+    mixins: [MediaQueryMixin, NodeExtrasMixin],
     el: '#app',
     data: {
       themeSwitcher,
@@ -260,11 +179,18 @@
       edit: { visible: false, loading: false, isEdit: false, model: emptyNode() },
       assign: { visible: false, loading: false, nodeId: 0, nodeName: '', selected: [] },
       token: { visible: false, value: '', command: '', nodeName: '' },
+      preview: {
+        visible: false, loading: false, nodeId: 0, nodeName: '',
+        config: '', notes: [], inbounds: [], relayChain: [], relayVia: '', hash: '',
+      },
       columns,
     },
     computed: {
       onlineCount() { return this.nodes.filter(n => this.isOnline(n)).length; },
       syncCount() { return this.nodes.filter(n => this.isSynced(n)).length; },
+      // Counted so a fleet with a broken node cannot look fine at a glance, which
+      // is the whole point of a summary line.
+      errorCount() { return this.nodes.filter(n => !!n.lastError).length; },
       // A node may not relay through itself, and the service refuses longer loops
       // as well; this only keeps the obvious one out of the picker.
       relayTargets() { return this.nodes.filter(n => n.id !== this.edit.model.id); },
@@ -431,6 +357,12 @@
         if (d < 86400) return Math.floor(d / 3600) + 'h ago';
         return Math.floor(d / 86400) + 'd ago';
       },
+      // Agent errors arrive as whatever the core printed, which can be several
+      // lines. The row shows the first line and the tooltip keeps the rest.
+      errorText(value) {
+        const first = String(value || '').split('\n')[0].trim();
+        return first.length > 42 ? first.slice(0, 42) + '...' : first;
+      },
       pct(v) { return Math.round(Number(v) || 0) + '%'; },
       nodeName(id) {
         const n = this.nodes.find(x => x.id === id);
@@ -478,7 +410,10 @@
       // relative times honest between polls, and a node that stops calling in
       // turns red on its own.
       this.ticker = setInterval(() => { this.now = Math.floor(Date.now() / 1000); }, 5000);
-      this.poller = setInterval(() => { if (!this.edit.visible && !this.assign.visible) this.loadNodes(); }, 20000);
+      this.poller = setInterval(() => {
+        if (this.edit.visible || this.assign.visible || this.preview.visible) return;
+        this.loadNodes();
+      }, 20000);
     },
     beforeDestroy() {
       clearInterval(this.ticker);
