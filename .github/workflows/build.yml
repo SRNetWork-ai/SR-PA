@@ -182,14 +182,27 @@ jobs:
             "" \
             "    bash <(curl -fsSL raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-node-install.sh) --url PANEL_URL --token TOKEN" \
             > notes.md
-          # A release is pinned to the commit it was cut from, so the rolling tag
-          # is replaced rather than re-uploaded into. It must stay a normal
-          # release: the /releases/latest endpoint the installer asks for skips
-          # prereleases, and would keep handing out an older build.
+          # The rolling tag is moved, not deleted and recreated. Deleting first
+          # left the repository with no release at all whenever a run was
+          # cancelled in the second between the two commands, and with
+          # cancel-in-progress on, two pushes a few minutes apart do exactly
+          # that. An installer that finds no release falls back to building on
+          # the customer's VPS, which is the slow path this pipeline exists to
+          # avoid.
+          #
+          # Pushing this tag does not start another run: the trigger above only
+          # matches tags named v*.
           if [ "$TAG" = "latest" ]; then
-            gh release delete latest --yes --cleanup-tag || true
+            git tag -f latest "$GITHUB_SHA"
+            git push -f origin refs/tags/latest
           fi
+          # Notes are rewritten on every run, not only when the release is
+          # created, so the release always states which commit its assets were
+          # built from. The rolling release must also stay a normal one: the
+          # /releases/latest endpoint the installer asks for skips prereleases
+          # and would keep handing out an older build.
           if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "SR-UI $TAG" --notes-file notes.md
             gh release upload "$TAG" sr-ui-* sr-node-* sha256sums.txt --clobber
           else
             gh release create "$TAG" sr-ui-* sr-node-* sha256sums.txt \
