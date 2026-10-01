@@ -1,0 +1,211 @@
+{{define "component/nodeModals"}}
+      <a-modal v-model="edit.visible" :class="themeSwitcher.currentTheme"
+        :title="edit.isEdit ? 'Edit node' : 'Add node'" :confirm-loading="edit.loading"
+        ok-text='{{ i18n "confirm" }}' cancel-text='{{ i18n "cancel" }}' @ok="saveNode">
+        <a-form layout="vertical">
+          <a-form-item label="Name">
+            <a-input v-model.trim="edit.model.name" placeholder="de-edge-1"></a-input>
+          </a-form-item>
+          <a-row :gutter="8">
+            <a-col :span="16">
+              <a-form-item label="Agent address">
+                <a-input v-model.trim="edit.model.address" placeholder="node address or domain"></a-input>
+              </a-form-item>
+            </a-col>
+            <a-col :span="8">
+              <a-form-item label="Agent port">
+                <a-input-number v-model="edit.model.port" :min="1" :max="65535" :style="{ width: '100%' }"></a-input-number>
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-row :gutter="8">
+            <a-col :span="12">
+              <a-form-item label="Role">
+                <a-select v-model="edit.model.role">
+                  <a-select-option value="edge">edge - traffic leaves here</a-select-option>
+                  <a-select-option value="relay">relay - forward to another node</a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+            <a-col :span="12" v-if="edit.model.role === 'relay'">
+              <a-form-item label="Relay via">
+                <a-select v-model="edit.model.relayViaId">
+                  <a-select-option :value="0">- pick a node -</a-select-option>
+                  <a-select-option v-for="n in relayTargets" :key="n.id" :value="n.id">[[ n.name ]]</a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-row :gutter="8">
+            <a-col :span="8">
+              <a-form-item label="Country code">
+                <a-input v-model.trim="edit.model.countryCode" placeholder="DE"></a-input>
+              </a-form-item>
+            </a-col>
+            <a-col :span="8">
+              <a-form-item label="City">
+                <a-input v-model.trim="edit.model.city" placeholder="Frankfurt"></a-input>
+              </a-form-item>
+            </a-col>
+            <a-col :span="8">
+              <a-form-item label="Provider">
+                <a-input v-model.trim="edit.model.provider" placeholder="hetzner"></a-input>
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-form-item label="Public host for client links">
+            <a-input v-model.trim="edit.model.publicHost" placeholder="leave empty to use the node address"></a-input>
+          </a-form-item>
+          <a-form-item label="Tags">
+            <a-input v-model.trim="edit.model.tags" placeholder="comma separated, free form"></a-input>
+          </a-form-item>
+          <a-row :gutter="8">
+            <a-col :span="12">
+              <a-form-item label="Agent speaks TLS">
+                <a-switch v-model="edit.model.useTls"></a-switch>
+              </a-form-item>
+            </a-col>
+            <a-col :span="12">
+              <a-form-item label="Enabled">
+                <a-switch v-model="edit.model.enable"></a-switch>
+              </a-form-item>
+            </a-col>
+          </a-row>
+        </a-form>
+      </a-modal>
+
+      <a-modal v-model="assign.visible" :class="themeSwitcher.currentTheme"
+        :title="'Inbounds on ' + assign.nodeName" :confirm-loading="assign.loading"
+        ok-text='{{ i18n "confirm" }}' cancel-text='{{ i18n "cancel" }}' @ok="saveAssign">
+        <p :style="{ color: '#8c8c8c' }">
+          Checked inbounds are served by this node. The agent picks the change up on its next heartbeat.
+        </p>
+        <a-checkbox-group v-model="assign.selected" :style="{ width: '100%' }">
+          <div v-for="ib in inbounds" :key="ib.id" :style="{ padding: '2px 0' }">
+            <a-checkbox :value="ib.id">[[ inboundLabel(ib) ]]</a-checkbox>
+          </div>
+        </a-checkbox-group>
+        <p v-if="!inbounds.length" :style="{ color: '#8c8c8c' }">No inbounds to assign yet.</p>
+      </a-modal>
+
+      <a-modal v-model="token.visible" :class="themeSwitcher.currentTheme"
+        :title="'Join token for ' + token.nodeName" :footer="null" :width="680">
+        <a-alert type="warning" show-icon message="Shown once"
+          description="Single use, valid for 30 minutes. The panel keeps only its hash, so copy it now."></a-alert>
+        <div :style="{ marginTop: '12px' }">
+          <a-input read-only :value="token.value"></a-input>
+        </div>
+        <div :style="{ marginTop: '12px' }">
+          <a-textarea read-only :value="token.command" :rows="4"></a-textarea>
+        </div>
+        <p :style="{ marginTop: '8px', color: '#8c8c8c', fontSize: '12px' }">
+          Run it as root on the new server. Add --insecure if this panel serves a self signed certificate.
+        </p>
+        <div :style="{ display: 'flex', gap: '8px' }">
+          <a-button type="primary" icon="copy" @click="copy(token.command)">Copy install command</a-button>
+          <a-button icon="copy" @click="copy(token.value)">Copy token</a-button>
+        </div>
+      </a-modal>
+
+      <a-modal v-model="preview.visible" :class="themeSwitcher.currentTheme"
+        :title="'Rendered config for ' + preview.nodeName" :footer="null" :width="860">
+        <a-spin :spinning="preview.loading" :delay="200">
+          <a-alert v-if="preview.notes.length" type="warning" show-icon
+            message="Some assigned inbounds are not in this config">
+            <div slot="description">
+              <div v-for="(note, i) in preview.notes" :key="i">[[ note ]]</div>
+            </div>
+          </a-alert>
+          <a-alert v-else-if="preview.inbounds.length" type="success" show-icon
+            message="Every assigned inbound made it into this config"></a-alert>
+          <a-alert v-else type="error" show-icon message="This node is serving nothing"
+            description="Nothing reached it. Assign an inbound, or check that the ones you assigned are enabled and still have clients."></a-alert>
+
+          <div :style="{ marginTop: '12px', fontSize: '12px', color: '#8c8c8c' }">
+            hash [[ short(preview.hash) ]] &middot; [[ preview.inbounds.length ]] inbound(s) in config
+            <span v-if="preview.relayVia"> &middot; relays through [[ preview.relayVia ]]</span>
+            <span v-if="preview.relayChain.length > 1"> &middot; path [[ preview.relayChain.join(' to ') ]]</span>
+          </div>
+
+          <div v-if="preview.inbounds.length" :style="{ marginTop: '6px' }">
+            <a-tag v-for="ib in preview.inbounds" :key="ib.inboundId">
+              inbound [[ ib.inboundId ]] on port [[ ib.remotePort ]]
+            </a-tag>
+          </div>
+
+          <a-textarea read-only :value="preview.config" :rows="16"
+            :style="{ marginTop: '10px', fontFamily: 'monospace', fontSize: '12px' }"></a-textarea>
+
+          <div :style="{ marginTop: '8px', display: 'flex', gap: '8px' }">
+            <a-button icon="copy" @click="copy(preview.config)">Copy config</a-button>
+            <a-button icon="reload" @click="openPreview({ id: preview.nodeId, name: preview.nodeName })">Reload</a-button>
+          </div>
+        </a-spin>
+      </a-modal>
+{{end}}
+
+{{define "component/nodeModalsScript"}}
+<script>
+  // Mixed into the Nodes page rather than written inline there: the page sits
+  // close enough to the size this panel can still hand around as one file, and
+  // the dialogs above are the part that keeps growing.
+  const NodeExtrasMixin = {
+    methods: {
+      // Asks the panel for the bundle the agent receives. Deliberately a fresh
+      // request every time rather than a cached copy: the whole value of this
+      // dialog is answering "what is on the node right now", and a stale answer
+      // to that question is worse than no answer.
+      async openPreview(node) {
+        this.preview.nodeId = node.id;
+        this.preview.nodeName = node.name;
+        this.preview.visible = true;
+        this.preview.loading = true;
+        this.preview.config = '';
+        this.preview.notes = [];
+        this.preview.inbounds = [];
+        this.preview.relayChain = [];
+        this.preview.relayVia = '';
+        this.preview.hash = '';
+
+        const msg = await HttpUtil.get('/panel/api/nodes/preview/' + node.id);
+        this.preview.loading = false;
+        if (!msg || !msg.success) return;
+
+        const obj = msg.obj || {};
+        this.preview.notes = obj.notes || [];
+        this.preview.inbounds = obj.inbounds || [];
+        this.preview.relayChain = obj.relayChain || [];
+        this.preview.relayVia = obj.relayVia || '';
+        this.preview.hash = obj.hash || '';
+        this.preview.config = this.prettyJson(obj.config);
+      },
+      // The config arrives as raw JSON, which is unreadable in one line. If it
+      // cannot be parsed it is shown exactly as received instead of being hidden
+      // behind an error, because an unparseable config is itself the finding.
+      prettyJson(value) {
+        if (value === undefined || value === null) return '';
+        try {
+          const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+          return JSON.stringify(parsed, null, 2);
+        } catch (e) {
+          return typeof value === 'string' ? value : String(value);
+        }
+      },
+      fmtBytes(value) {
+        let v = Number(value) || 0;
+        if (v <= 0) return '0';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+        let i = 0;
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+        return (i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)) + ' ' + units[i];
+      },
+      // Config hashes are too long to read and only ever compared, so the table
+      // and this dialog show the head of one.
+      short(value) {
+        const s = String(value || '');
+        return s ? s.slice(0, 12) : '-';
+      },
+    },
+  };
+</script>
+{{end}}
