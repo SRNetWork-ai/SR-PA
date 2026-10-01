@@ -6,7 +6,7 @@
 servers, multi-node relays for multi-location deployments, one account across
 many inbounds, and per-account accounting that actually adds up.
 
-English | [فارسی](README_FA.md) | [العربية](README_AR.md) | [Русский](README_RU.md) | [中文](README_ZH.md) | [Türkçe](README_TR.md) | [Español](README_ES.md)
+English | [فارسی](README_FA.md)
 
 </div>
 
@@ -57,13 +57,18 @@ external daemon, no kernel module and no nftables rules.
 - **Master.** The panel host itself. It owns every account and all billing and
   cannot be deleted or disabled.
 - **Nodes.** Remote servers running the agent. Each node reports status, agent
-  version, sync state and its inbound count, and shows up as a group in the
-  client editor so you pick exactly which node's inbounds an account gets.
+  and core version, load, sync state and its inbound count, and shows up as a
+  group in the client editor so you pick exactly which node's inbounds an
+  account gets.
 - **Sync.** Inbound definitions flow master to node; usage and session state flow
   node to master, so quota, expiry and device limits are enforced from one place.
+- **Relay chains.** A node can serve traffic directly or carry it through another
+  node, which is how an exit that cannot be reached directly is still sold as a
+  location.
 
 A customer's config set can therefore span locations: one subscription link, one
-quota, several exit points.
+quota, several exit points. Full details in
+[docs/nodes-and-relay.md](docs/nodes-and-relay.md).
 
 ---
 
@@ -81,6 +86,10 @@ Enforcement is level-triggered, not fire-and-forget: every traffic tick
 re-derives the disabled set from the database and re-applies it, so a session
 that slipped through the exact tick a quota was crossed is still ended on the
 next one.
+
+Device identity is not the same thing as an IP address, and the panel no longer
+treats it as one - see
+[docs/ip-and-device-intelligence.md](docs/ip-and-device-intelligence.md).
 
 ---
 
@@ -103,24 +112,57 @@ next one.
 ## API
 
 The panel exposes an HTTP API covering inbounds, clients, memberships, traffic,
-nodes, settings and server actions. It is documented in full, endpoint by
-endpoint with request and response bodies, in [api-reference.md](api-reference.md).
+nodes, settings and server actions. The web UI uses the same API, so there is no
+reduced "public" subset.
+
+- **[docs/api.md](docs/api.md)** - authentication, API tokens and their scopes,
+  the response envelope, and a map of every route group. Start here.
+- [api-reference.md](api-reference.md) - the per-endpoint reference, with request
+  and response bodies.
+
+An API token is a **narrowed copy of the admin who minted it**, re-derived on
+every request: narrowing an admin narrows their tokens immediately, disabling or
+deleting the admin invalidates them, and super admin has to be asked for
+explicitly rather than inherited.
 
 ---
 
 ## Install
 
-### From a release binary
+### Quick install
 
-Download the binary for your architecture from the repository releases, then
-install the service and the management menu:
+On the server, as root:
+
+```bash
+bash <(curl -fsSL raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-ui-install.sh)
+```
+
+The installer detects the distribution and CPU architecture, installs the
+prebuilt binary when one fits and builds from source when it does not, picks a
+free port, generates credentials and a random base path, installs the service
+and the `sr-ui` menu, and prints the panel address once the panel actually
+answers on it. Add `-y` to skip every prompt, or `--dry-run` to see the plan
+without touching the machine.
+
+The pinned Xray core and the base geo data are bundled inside the released
+binary, so a fresh install has a working core immediately.
+
+### Joining a node
+
+Run on the node, with an enrollment token minted in the panel under **Nodes**:
+
+```bash
+bash <(curl -fsSL raw.githubusercontent.com/SRNetWork-ai/SR-PA/main/scripts/sr-node-install.sh) --url PANEL_URL --token TOKEN
+```
+
+### From a release binary, by hand
 
 ```bash
 sudo mkdir -p /opt/sr-ui
-sudo mv sr-ui-amd64 /opt/sr-ui/
-sudo chmod +x /opt/sr-ui/sr-ui-amd64
-sudo /opt/sr-ui/sr-ui-amd64 install-menu /usr/bin/sr-ui
-sudo /opt/sr-ui/sr-ui-amd64 --systemd
+sudo mv sr-ui-amd64 /opt/sr-ui/sr-ui
+sudo chmod +x /opt/sr-ui/sr-ui
+sudo /opt/sr-ui/sr-ui install-menu /usr/bin/sr-ui
+sudo /opt/sr-ui/sr-ui --systemd
 sudo systemctl enable --now sr-ui
 ```
 
@@ -165,6 +207,13 @@ bash scripts/brand-sr-ui.sh --check    # verify brand strings
 go build -trimpath -ldflags "-s -w" -o sr-ui-amd64 -v .
 ```
 
+A source build has no embedded core unless you fetch one first, which is what
+`scripts/sr-ui-core.sh` is for:
+
+```bash
+sudo bash scripts/sr-ui-core.sh --dir /opt/sr-ui/bin
+```
+
 The repository also ships `build.sh` for the full release build (embedded assets
 and bundled cores) and `deploy.sh` for scripted server deployment. CI builds and
 vets every push, so release artifacts come from the workflow rather than a
@@ -195,6 +244,7 @@ upgrade never breaks an existing unit file.
 ```
 main.go            entry point, CLI, embedded management script
 config/            build-time name, version and path resolution
+cmd/sr-node/       the node agent
 web/
   controller/      HTTP handlers and API routes
   service/         panel logic: inbounds, accounts, protocols, nodes, limits
@@ -204,7 +254,9 @@ web/
 xray/              Xray process control, config model and stats API client
 database/          models and migrations
 sub/               subscription server
-scripts/           branding and server migration helpers
+corebundle/        the Xray core and geo data embedded into the binary
+scripts/           installer, core fetcher, branding and migration helpers
+docs/              operator documentation
 test_unit/         integration harness
 ```
 
@@ -212,7 +264,15 @@ test_unit/         integration harness
 
 ## Documentation
 
-The design documents in the repository root are the real reference for how each
+Operator guides live in `docs/`:
+
+| Document | Covers |
+| --- | --- |
+| [docs/api.md](docs/api.md) | API tokens, scopes, and the route map |
+| [docs/nodes-and-relay.md](docs/nodes-and-relay.md) | nodes, enrollment, config sync, relay chains, traffic reporting |
+| [docs/ip-and-device-intelligence.md](docs/ip-and-device-intelligence.md) | device identity, carrier and network detection, device registry |
+
+The design documents in the repository root are the reference for how each
 subsystem works and why:
 
 | Document | Covers |
