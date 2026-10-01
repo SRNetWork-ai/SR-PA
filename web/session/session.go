@@ -1,4 +1,4 @@
-// Package session provides session management utilities for the vpn-ui web panel.
+// Package session provides session management utilities for the SR-UI web panel.
 // It handles user authentication state, login sessions, and session storage using Gin sessions.
 package session
 
@@ -42,6 +42,27 @@ func SetLoginUser(c *gin.Context, user *model.User) {
 	}
 	s := sessions.Default(c)
 	s.Set(loginUserKey, user.Id)
+	c.Set(loginUserCtxKey, user)
+}
+
+// SetRequestUser authenticates a caller for THIS REQUEST ONLY, without touching
+// the session cookie.
+//
+// This exists for credentials that are not browser logins - API tokens, and
+// anything else that proves itself on every call. SetLoginUser would also work,
+// because GetLoginUser reads this same request cache first, but it writes the
+// session as a side effect: a script posting with a bearer token would be handed
+// a panel login it never asked for and cannot use.
+//
+// The user installed here is also allowed to be a NARROWED COPY of a stored row
+// rather than the row itself, which is how an API token is scoped: every gate in
+// the panel asks User.Can and User.IsSuperAdmin, so a copy with a reduced mask is
+// enforced by all of them without any gate knowing tokens exist. Nothing in this
+// package writes that user back to the database.
+func SetRequestUser(c *gin.Context, user *model.User) {
+	if user == nil {
+		return
+	}
 	c.Set(loginUserCtxKey, user)
 }
 
